@@ -2,7 +2,7 @@
 """
 Nightly Options Scanner  (Yahoo Finance via yfinance — no API key needed)
 =========================================================================
-Run after the close (e.g. 6:30 pm ET). Builds docs/index.html (and docs/check.html at 10 am) with a
+Run right after the close (4:20 pm ET, while option quotes are still live). Builds docs/index.html (and docs/check.html at 10 am) with a
 trade plan for each ticker: earnings/event context, call & put walls,
 unusual-flow lean (bought vs sold), and a 3:1–4:1 risk/reward plan.
 
@@ -55,14 +55,18 @@ DISCOVER_LOOKBACK_DAYS = 6        # calendar days back to look for reporters
 MAX_DISCOVERED = 40
 
 POST_EARNINGS_MAX_BARS = 7        # treat as "post-earnings" for up to 7 sessions after the reaction day
-MIN_DTE, MAX_DTE = 5, 60          # expirations used for walls + flow
-MAX_EXPIRATIONS = 6               # cap requests per ticker
+MIN_DTE, MAX_DTE = 0, 60          # expirations used for walls + flow (0 = include same-day / this-week contracts)
+NEAR_EXPIRATIONS = 4              # nearest expirations (this week + next), where next-day flow usually shows up
+FRIDAY_EXPIRATIONS = 4            # plus the next few Friday expirations out to MAX_DTE
 PLAN_DTE_RANGE = (21, 60)         # expiration window for the suggested option trade
 HOLD_DAYS_ASSUMED = 7             # option R:R estimates assume you hit target/stop within ~a week
 
 UNUSUAL_MIN_VOLUME = 300
 UNUSUAL_VOL_OI = 1.25             # volume / open interest
 UNUSUAL_MIN_PREMIUM = 50_000      # $ notional (volume * mid * 100)
+BIG_PREMIUM = 1_000_000           # any single contract with $1M+ traded is shown, even at a busy strike
+TOP_PREMIUM_MIN = 250_000         # ...and each ticker's top 3 contracts by premium if at least this much
+SURGE_X = 2.0                     # call or put premium this many times its 10-day average = a surge
 
 MIN_RR, IDEAL_RR = 3.0, 4.0
 RISK_FREE = 0.04
@@ -274,8 +278,10 @@ def load_chains(tk, spot, today):
         dte = (d - today).days
         if MIN_DTE <= dte <= MAX_DTE:
             exps.append((e, dte))
-    # keep the nearest few + make sure one is in the plan window
-    chosen = exps[:MAX_EXPIRATIONS]
+    # nearest few (this week / next) + upcoming Fridays + one in the plan window
+    near = [x for x in exps if x[1] <= 9][:NEAR_EXPIRATIONS]
+    later = [x for x in exps if x[1] > 9 and dt.date.fromisoformat(x[0]).weekday() == 4][:FRIDAY_EXPIRATIONS]
+    chosen = near + later
     if not any(PLAN_DTE_RANGE[0] <= d <= PLAN_DTE_RANGE[1] for _, d in chosen):
         extra = [x for x in exps if PLAN_DTE_RANGE[0] <= x[1] <= PLAN_DTE_RANGE[1]]
         if extra:
@@ -353,9 +359,13 @@ MEANING = {("C", "BOUGHT"): ("Calls bought", 1), ("C", "SOLD"): ("Calls sold", -
 def unusual_flow(df, today):
     d = df.copy()
     d["premium"] = d["volume"] * d["mid"] * 100
-    m = (d["volume"] >= UNUSUAL_MIN_VOLUME) & (d["volume"] >= UNUSUAL_VOL_OI * d["openInterest"].clip(lower=1)) \
+    new_pos = (d["volume"] >= UNUSUAL_MIN_VOLUME) & (d["volume"] >= UNUSUAL_VOL_OI * d["openInterest"].clip(lower=1)) \
         & (d["premium"] >= UNUSUAL_MIN_PREMIUM)
-    u = d[m].sort_values("premium", ascending=False).head(12)
+    big = d["premium"] >= BIG_PREMIUM
+    top = d["premium"].rank(ascending=False, method="first") <= 3
+    top &= d["premium"] >= TOP_PREMIUM_MIN
+    d["why"] = np.where(new_pos, "volume over open interest", np.where(big, "$1M+ premium", "top premium today"))
+    u = d[new_pos | big | top].sort_values("premium", ascending=False).head(12)
     rows, bull, bear = [], 0.0, 0.0
     for _, r in u.iterrows():
         lean, pos = side_lean(r)
@@ -367,7 +377,8 @@ def unusual_flow(df, today):
         rows.append(dict(contract=r.get("contractSymbol", ""), cp=r["cp"], strike=float(r["strike"]), expiry=r["expiry"],
                          dte=int(r["dte"]), volume=int(r["volume"]), oi=int(r["openInterest"]),
                          vol_oi=r["volume"] / max(r["openInterest"], 1), premium=float(r["premium"]),
-                         lean=lean, label=label, sign=sign, pos=pos, bid=r["bid"], ask=r["ask"], last=r["lastPrice"]))
+                         lean=lean, label=label, sign=sign, pos=pos, bid=r["bid"], ask=r["ask"], last=r["lastPrice"],
+                         why=r["why"]))
     tot = bull + bear
     bias = (bull - bear) / tot if tot else 0.0
     return rows, bias, bull, bear
@@ -397,10 +408,40 @@ def oi_followup(sym, df):
     return out
 
 
-def save_snapshot(sym, today, flow_rows):
+def premium_totals(df, spot):
+    d = df.copy()
+    d["premium"] = d["volume"] * d["mid"] * 100
+    c, p = d[d.cp == "C"], d[d.cp == "P"]
+    quoted = ((d["bid"] > 0) & (d["ask"] > 0) & (d["volume"] > 0)).sum() / max((d["volume"] > 0).sum(), 1)
+    return dict(call_prem=float(c["premium"].sum()), put_prem=float(p["premium"].sum()),
+                otm_call_prem=float(c.loc[c.strike > spot, "premium"].sum()),
+                otm_put_prem=float(p.loc[p.strike < spot, "premium"].sum()), quoted=float(quoted))
+
+
+def premium_surge(sym, tot):
+    """Today's call/put premium vs this ticker's own average over the last 10 scans."""
+    hist = []
+    for f in sorted(SNAP_DIR.glob(f"{sym}_*.json")):
+        if f.stem.endswith(dt.date.today().isoformat()):
+            continue
+        try:
+            t = json.loads(f.read_text()).get("totals")
+            if t:
+                hist.append(t)
+        except Exception:
+            pass
+    out = dict(tot, days=len(hist), call_x=None, put_x=None)
+    if len(hist) >= 3:
+        ac = np.mean([h["call_prem"] for h in hist]); ap = np.mean([h["put_prem"] for h in hist])
+        out["call_x"] = tot["call_prem"] / ac if ac else None
+        out["put_x"] = tot["put_prem"] / ap if ap else None
+    return out
+
+
+def save_snapshot(sym, today, flow_rows, totals=None):
     SNAP_DIR.mkdir(exist_ok=True)
     (SNAP_DIR / f"{sym}_{today.isoformat()}.json").write_text(
-        json.dumps(dict(date=today.isoformat(), unusual=flow_rows), default=float))
+        json.dumps(dict(date=today.isoformat(), unusual=flow_rows, totals=totals), default=float))
     old = sorted(SNAP_DIR.glob(f"{sym}_*.json"))[:-10]   # keep 10 nights
     for f in old:
         f.unlink(missing_ok=True)
@@ -566,7 +607,7 @@ def strat_entries(strat, side, t1, t2, atr, spot):
 # ----------------------------------------------------------------------------
 # Trade plan
 # ----------------------------------------------------------------------------
-def build_plan(sym, px, ear, w, bias, follow, df, today, events, strat=None, tfc=None):
+def build_plan(sym, px, ear, w, bias, follow, df, today, events, strat=None, tfc=None, flowx=None):
     spot, atr = px["spot"], px["atr"]
     reasons, score = [], 0.0
 
@@ -591,6 +632,11 @@ def build_plan(sym, px, ear, w, bias, follow, df, today, events, strat=None, tfc
     if abs(bias) >= 0.3:
         score += 1 if bias > 0 else -1
         reasons.append(f"Unusual flow leans {'bullish' if bias > 0 else 'bearish'} ({bias:+.0%} of classified premium)")
+    sg = flowx or {}
+    if sg.get("call_x") and sg["call_x"] >= SURGE_X and bias > 0:
+        score += 0.5; reasons.append(f"Call premium {sg['call_x']:.1f}× its 10-day average")
+    if sg.get("put_x") and sg["put_x"] >= SURGE_X and bias < 0:
+        score -= 0.5; reasons.append(f"Put premium {sg['put_x']:.1f}× its 10-day average")
     conf = [f for f in follow if f["opened"] and f["sign"]]
     if conf:
         s = sum(f["sign"] for f in conf)
@@ -764,6 +810,9 @@ def scan_one(sym, today, events):
     w = walls(df, px["spot"])
     flow, bias, bull, bear = unusual_flow(df, today)
     follow = oi_followup(sym, df)
+    totals = premium_totals(df, px["spot"])
+    flowx = premium_surge(sym, totals)
+    flowx.update(bias=bias, bull=bull, bear=bear)
     atm = df[(df.cp == "C") & (df.dte >= 20)]
     if len(atm):
         a = atm.iloc[(atm["strike"] - px["spot"]).abs().argsort()].iloc[0]
@@ -772,10 +821,10 @@ def scan_one(sym, today, events):
         iv_hv = "—"
     strat = strat_scan(hist)
     tfc = ftfc(hist)
-    plan = build_plan(sym, px, ear, w, bias, follow, df, today, events, strat, tfc)
-    save_snapshot(sym, today, flow)
+    plan = build_plan(sym, px, ear, w, bias, follow, df, today, events, strat, tfc, flowx)
+    save_snapshot(sym, today, flow, totals)
     return dict(sym=sym, px=px, ear=ear, walls=w, flow=flow, follow=follow, plan=plan, iv_hv=iv_hv,
-                strat=strat, tfc=tfc)
+                strat=strat, tfc=tfc, flowx=flowx)
 
 
 def main():

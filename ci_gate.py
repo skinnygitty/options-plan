@@ -29,7 +29,7 @@ def decide(now, event, manual=""):
         return "skip"
     day = now.date().isoformat()
     mins = now.hour * 60 + now.minute
-    if 18 * 60 <= mins < 23 * 60 and not ran_evening(day):
+    if 16 * 60 + 15 <= mins < 23 * 60 and not ran_evening(day):
         return "evening"
     if 9 * 60 + 45 <= mins < 13 * 60 and not ran_check(day):
         return "check"

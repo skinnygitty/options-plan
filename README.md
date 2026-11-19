@@ -23,7 +23,7 @@ Your Mac doesn't need to be on.
    then Add to Home Screen.
 
 ### Schedule
-- Evening scan about **6:37 pm ET**, 10:00 check about **10:03 am ET**, Monday to Friday.
+- Evening scan about **4:20 pm ET** (right after the close, while option bid/ask quotes are still live), 10:00 check about **10:03 am ET**, Monday to Friday.
 - GitHub runs schedules in UTC, so each job is listed for both daylight-saving and standard time;
   `ci_gate.py` runs the one that lands at the right New York time and skips the other.
 - GitHub can start scheduled runs late when it's busy. The check accepts runs until 1 pm; the footer on each
@@ -38,6 +38,16 @@ Your Mac doesn't need to be on.
 - **Yahoo can rate-limit GitHub's servers.** The scanner backs off and retries, and the evening job has a second
   scheduled slot an hour later. If a run fails, it shows red in the Actions tab and the site keeps the previous
   plan. If this keeps happening, see "Run on the Mac instead" below.
+
+## How unusual flow is caught
+A contract is flagged if any of these is true:
+- volume is at least 1.25× its open interest with $50K+ premium (new positions likely), or
+- $1M+ premium traded in it, even at a busy strike where open interest is already large, or
+- it's one of the ticker's top 3 contracts by premium, with at least $250K.
+Expirations from today out to 60 days are scanned: the nearest four (this week and next) plus the next four Fridays.
+Each night the scanner also stores every ticker's total call and put premium, so after a few nights it can say
+"call premium 2.6× its 10-day average". **Flow alerts** at the top of the page lists tickers with $1M+ one-sided
+premium or a 2× surge, even if the rest of the setup isn't ready.
 
 ## Changing what it scans
 Edit these files on github.com (pencil icon) and commit; the next run picks them up.
@@ -97,7 +107,7 @@ opened new positions according to the overnight open-interest update.
 
 ## Run on the Mac instead (fallback)
 If Yahoo blocks GitHub's servers, the same code runs on your Mac and pushes the pages to GitHub:
-1. `bash setup_mac.sh` (installs Python packages and schedules 6:30 pm and 10:00 am runs on the Mac).
+1. `bash setup_mac.sh` (installs Python packages and schedules 4:20 pm and 10:00 am runs on the Mac).
 2. `touch .push_from_mac` to turn on pushing to GitHub after each Mac run.
 3. In `.github/workflows/scanner.yml`, delete the four `cron:` lines so the two don't both run.
 To stop the Mac schedule: `launchctl unload ~/Library/LaunchAgents/com.optionsscanner.*.plist`

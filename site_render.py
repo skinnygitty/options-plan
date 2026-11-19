@@ -99,6 +99,16 @@ section.block h2{font:700 22px/1.2 var(--display);letter-spacing:-.015em;margin:
 section.block > p{color:var(--muted);margin:0 0 12px;max-width:60ch}
 .plain{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius-card);padding:6px 18px}
 footer{color:var(--muted);font-size:13px;margin-top:48px;max-width:62ch}
+.alerts{margin-top:26px}
+.alerts h2{font:700 22px/1.2 var(--display);letter-spacing:-.015em;margin:0 0 2px}
+.alerts > p{margin:0 0 10px}
+a.alert{display:grid;grid-template-columns:auto auto 1fr;gap:4px 10px;align-items:baseline;text-decoration:none;
+ background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--signal);border-radius:10px;padding:10px 14px;margin:6px 0}
+a.alert .sym-s{font:700 18px/1 var(--display)}
+a.alert .pill{justify-self:start}
+a.alert .atext{font-size:14px;color:var(--muted)}
+@media (max-width:520px){a.alert{grid-template-columns:auto 1fr}a.alert .atext{grid-column:1 / -1}}
+.card{scroll-margin-top:70px}
 .empty{background:var(--surface);border:1px dashed var(--line);border-radius:var(--radius-card);padding:28px 18px;color:var(--muted)}
 @media (max-width:520px){.stats{grid-template-columns:repeat(2,1fr)}.sym{font-size:24px}.brand{display:none}
  header.top .wrap{justify-content:center}.card{padding:16px 14px 4px}}
@@ -296,11 +306,11 @@ def card_body(r, MIN_RR, STRAT_TFS):
 
     if r["flow"]:
         o.append("<h3>Unusual activity today</h3><div class='scroll'><table><tr><th>Contract</th><th>Volume</th><th>OI</th><th>Premium</th>"
-                 "<th>Last trade</th><th>Lean</th></tr>")
+                 "<th>Last trade</th><th>Lean</th><th>Flagged for</th></tr>")
         for f in r["flow"]:
             where = "—" if f["pos"] is None else f"{f['pos']:.0%} toward ask"
             o.append(f"<tr><td>{f['expiry']} {f['strike']:g}{f['cp']}</td><td>{f['volume']:,}</td><td>{f['oi']:,}</td>"
-                     f"<td>{money_short(f['premium'])}</td><td>{where}</td><td>{e(f['label'])}</td></tr>")
+                     f"<td>{money_short(f['premium'])}</td><td>{where}</td><td>{e(f['label'])}</td><td>{e(f.get('why', ''))}</td></tr>")
         o.append("</table></div>")
     if r["follow"]:
         o.append("<h3>Did yesterday's flow stick?</h3><div class='scroll'><table><tr><th>Contract</th><th>Lean</th><th>Volume</th>"
@@ -310,6 +320,45 @@ def card_body(r, MIN_RR, STRAT_TFS):
         o.append("</table></div>")
     o.append("</div>")
     return "".join(o)
+
+
+def flow_alerts(results, BIG=1_000_000, SURGE=2.0):
+    """Tickers with heavy one-sided premium or a premium surge, whatever their setup score."""
+    out = []
+    for r in results:
+        fx = r.get("flowx") or {}
+        bull, bear = fx.get("bull", 0.0), fx.get("bear", 0.0)
+        unclear = sum(f["premium"] for f in r["flow"] if f["sign"] == 0)
+        cx, px_ = fx.get("call_x"), fx.get("put_x")
+        surge = max(cx or 0, px_ or 0) >= SURGE
+        lean_bull = bull >= 1.5 * bear and bull >= 250_000
+        lean_bear = bear >= 1.5 * bull and bear >= 250_000
+        side = None
+        if (bull >= BIG and bull >= 2 * bear) or (surge and lean_bull):
+            side = "Bullish"
+        elif (bear >= BIG and bear >= 2 * bull) or (surge and lean_bear):
+            side = "Bearish"
+        elif surge:
+            side = "Premium surge"
+        elif unclear >= 2 * BIG:
+            side = "Side unclear"
+        if not side:
+            continue
+        top = max(r["flow"], key=lambda f: f["premium"]) if r["flow"] else None
+        bits = []
+        if bull or bear:
+            bits.append(f"{money_short(bull)} bullish vs {money_short(bear)} bearish in flagged contracts")
+        if unclear >= BIG:
+            bits.append(f"{money_short(unclear)} where bought/sold couldn't be read")
+        if cx and cx >= 1.5:
+            bits.append(f"call premium {cx:.1f}× its 10-day average")
+        if px_ and px_ >= 1.5:
+            bits.append(f"put premium {px_:.1f}× its 10-day average")
+        if top:
+            bits.append(f"largest: {top['expiry'][5:]} {top['strike']:g}{top['cp']}, {money_short(top['premium'])}, {top['label'].lower()}")
+        weight = max(bull, bear, unclear) * (cx or 1)
+        out.append(dict(sym=r["sym"], side=side, text="; ".join(bits) + ".", weight=weight))
+    return sorted(out, key=lambda x: -x["weight"])
 
 
 def render_plan(results, upcoming, today, errors, MIN_RR, STRAT_TFS):
@@ -329,6 +378,19 @@ def render_plan(results, upcoming, today, errors, MIN_RR, STRAT_TFS):
     b = [f"<section class='hero'><p class='when'>Plan for {nice_day(sess)}, from the {today.strftime('%b')} {today.day} close</p>"
          f"<h1>{e(head[0].upper() + head[1:])}</h1>"
          f"<p class='sub'>{plural(nW, 'more name')} on watch, {nP} just past earnings. Levels are on the line; tap a ticker for the full plan.</p></section>"]
+    alerts = flow_alerts(results)
+    quoted = [r["flowx"]["quoted"] for r in results if r.get("flowx") and r["flowx"].get("quoted") is not None]
+    if alerts:
+        b.append("<section class='alerts'><h2>Flow alerts</h2><p class='muted'>Heavy one-sided premium or a jump versus the "
+                 "ticker's normal, whether or not the full setup is ready yet.</p>")
+        for al in alerts[:8]:
+            cls = "LONG" if al["side"] == "Bullish" else "SHORT" if al["side"] == "Bearish" else "WATCH"
+            b.append(f"<a class='alert' href='#t-{e(al['sym'])}'><span class='sym-s'>{e(al['sym'])}</span>"
+                     f"<span class='pill {cls}'>{al['side']}</span><span class='atext'>{e(al['text'])}</span></a>")
+        if quoted and sum(quoted) / len(quoted) < 0.5:
+            b.append("<p class='muted'>Yahoo had no bid/ask for most contracts when this ran, so many trades show as side unclear. "
+                     "The 10:00 check reads them again with live quotes.</p>")
+        b.append("</section>")
     b.append("<div class='chips' role='group' aria-label='Filter'>"
              f"<button data-f='all' aria-pressed='true'>All<span class='n'>{len(results)}</span></button>"
              f"<button data-f='LONG' aria-pressed='false'>Long<span class='n'>{nL}</span></button>"
@@ -348,7 +410,7 @@ def render_plan(results, upcoming, today, errors, MIN_RR, STRAT_TFS):
         verb = "above" if p["side"] == "LONG" else "below"
         how = (f"{best['tf']} {best['name']}" if best else p["trigger"])
         lean = "" if p["direction"] != "WATCH" else f" <span class='muted'>(watch; leaning {p['side'].lower()})</span>"
-        b.append(f"<article class='card' data-dir='{p['direction']}' data-post='{1 if p['post_earnings'] else 0}'>"
+        b.append(f"<article class='card' id='t-{e(r['sym'])}' data-dir='{p['direction']}' data-post='{1 if p['post_earnings'] else 0}'>"
                  f"<div class='head'><span class='sym'>{e(r['sym'])}</span><span class='pill {p['direction']}'>{p['direction'].title()}</span>"
                  + ("<span class='pill POST'>Post-earnings</span>" if p["post_earnings"] else "")
                  + f"<span class='rr {'ok' if ok else 'no'}'>R:R {rr1:.1f} : 1</span></div>"
