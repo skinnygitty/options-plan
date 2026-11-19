@@ -6,8 +6,8 @@ on:
     # runs only the one that lands at the right New York time and skips the other.
     - cron: "20 20 * * 1-5"   # 4:20 pm EDT  (evening scan, summer)
     - cron: "20 21 * * 1-5"   # 4:20 pm EST  (evening scan, winter)   # 6:37 pm EDT  (evening scan, summer)
-    - cron: "3 14 * * 1-5"    # 10:03 am EDT (10:00 check, summer)
-    - cron: "3 15 * * 1-5"    # 10:03 am EST (10:00 check, winter)
+    - cron: "50 13 * * 1-5"   # 9:50 am EDT (morning check, summer)
+    - cron: "50 14 * * 1-5"   # 9:50 am EST (morning check, winter)
   workflow_dispatch:          # "Run workflow" button for a manual run
     inputs:
       mode:
