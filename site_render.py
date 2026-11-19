@@ -1,7 +1,7 @@
 """
 Renders the two pages of the site:
   docs/index.html  — tonight's plan (evening scan)
-  docs/check.html  — the 10:00 am check
+  docs/check.html  — the 9:50 am morning check
 Mobile-first, light/dark aware, no build step. Everything is in one file per page.
 """
 import datetime as dt
@@ -153,7 +153,7 @@ def next_session(d):
 
 def page(title, active, body, script=""):
     tabs = (f"<a href='index.html' {'aria-current=page' if active == 'plan' else ''}>Tonight</a>"
-            f"<a href='check.html' {'aria-current=page' if active == 'check' else ''}>10:00 check</a>")
+            f"<a href='check.html' {'aria-current=page' if active == 'check' else ''}>Morning check</a>")
     return (f"<!doctype html><html lang='en'><head><meta charset='utf-8'>"
             f"<meta name='viewport' content='width=device-width,initial-scale=1,viewport-fit=cover'><meta name='robots' content='noindex,nofollow'>"
             f"<meta name='theme-color' content='#EDF0F3' media='(prefers-color-scheme: light)'>"
@@ -389,7 +389,7 @@ def render_plan(results, upcoming, today, errors, MIN_RR, STRAT_TFS):
                      f"<span class='pill {cls}'>{al['side']}</span><span class='atext'>{e(al['text'])}</span></a>")
         if quoted and sum(quoted) / len(quoted) < 0.5:
             b.append("<p class='muted'>Yahoo had no bid/ask for most contracts when this ran, so many trades show as side unclear. "
-                     "The 10:00 check reads them again with live quotes.</p>")
+                     "The 9:50 am morning check reads them again with live quotes.</p>")
         b.append("</section>")
     b.append("<div class='chips' role='group' aria-label='Filter'>"
              f"<button data-f='all' aria-pressed='true'>All<span class='n'>{len(results)}</span></button>"
@@ -451,7 +451,7 @@ the ring is the last close, and grey ticks are the call and put walls.</p></sect
 
 
 # ---------------------------------------------------------------------------
-# 10:00 check page
+# Morning check page (9:50 am)
 # ---------------------------------------------------------------------------
 STATUS_PILL = {"Triggered": "GOOD", "Waiting": "WAIT", "Extended": "WAIT", "Failed": "BAD", "Stopped": "BAD", "At target": "WAIT"}
 
@@ -470,7 +470,7 @@ def render_check(rows, oi_rows, early, futs, stale, plan_date, today, now_str):
     fut = "  ".join(f"{n} {g:+.2%}" for n, g in futs)
     b = [f"<section class='hero'><p class='when'>{nice_day(today)} at {e(now_str)}, plans from the {dt.date.fromisoformat(plan_date).strftime('%b')} {dt.date.fromisoformat(plan_date).day} close</p>"
          f"<h1>{e(head[0].upper() + head[1:])}</h1>"
-         f"<p class='sub'>The first 30 minutes are done; the shaded band on each line is that opening range. {e(fut)}</p></section>"]
+         f"<p class='sub'>The shaded band on each line is the opening range so far, from 9:30. {e(fut)}</p></section>"]
     b.append("<div class='chips' role='group' aria-label='Filter'>"
              f"<button data-f='all' aria-pressed='true'>All<span class='n'>{len(rows)}</span></button>"
              f"<button data-f='Triggered' aria-pressed='false'>Triggered<span class='n'>{nT}</span></button>"
@@ -478,7 +478,7 @@ def render_check(rows, oi_rows, early, futs, stale, plan_date, today, now_str):
              f"<button data-f='Extended' aria-pressed='false'>Extended<span class='n'>{nX}</span></button></div>")
     b.append("<div class='list'>")
     if not rows:
-        b.append("<div class='empty'>The 10:00 check hasn't run yet today. It reads last night's plan and runs at 10:00 am on weekdays.</div>")
+        b.append("<div class='empty'>The morning check hasn't run yet today. It reads last night's plan and runs at 9:50 am on weekdays.</div>")
     order = ["Triggered", "Extended", "Waiting", "At target", "Failed", "Stopped"]
     for r in sorted(rows, key=lambda r: (r["dir"] == "WATCH", order.index(r["state"]))):
         lv = [("Stop", r["stop"], "stop"), ("Entry", r["trig"], "entry"), ("T1", r["t1"], "t"), ("Now", r["now"], "now")]
@@ -515,11 +515,11 @@ def render_check(rows, oi_rows, early, futs, stale, plan_date, today, now_str):
     b.append("</section>")
     b.append("<footer>Stock prices from Yahoo are close to real time; option quotes can lag by several minutes. "
              "A trigger counts when price trades through it and holds. Not financial advice.</footer>")
-    return page(f"10:00 check {today}", "check", "".join(b), FILTER_JS)
+    return page(f"Morning check {today}", "check", "".join(b), FILTER_JS)
 
 
 def early_table(rows):
-    o = ["<p class='muted'>Contracts with heavy volume in the first 30 minutes. Bid and ask are live now, so the bought/sold lean is more reliable than overnight.</p>"
+    o = ["<p class='muted'>Contracts with heavy volume since the open. Bid and ask are live now, so the bought/sold lean is more reliable than overnight.</p>"
          "<div class='scroll'><table><tr><th>Contract</th><th>Volume</th><th>OI</th><th>Premium</th><th>Lean</th></tr>"]
     for f in rows:
         o.append(f"<tr><td>{f['expiry']} {f['strike']:g}{f['cp']}</td><td>{f['volume']:,}</td><td>{f['oi']:,}</td>"
@@ -529,6 +529,6 @@ def early_table(rows):
 
 
 def placeholder_check(today):
-    body = (f"<section class='hero'><p class='when'>{nice_day(next_session(today))}</p><h1>The 10:00 check runs after the open</h1>"
-            "<p class='sub'>It reads tonight's plan and shows which triggers fired in the first 30 minutes.</p></section>")
-    return page("10:00 check", "check", body)
+    body = (f"<section class='hero'><p class='when'>{nice_day(next_session(today))}</p><h1>The morning check runs at 9:50 am</h1>"
+            "<p class='sub'>It reads tonight's plan and shows which triggers fired after the open.</p></section>")
+    return page("Morning check", "check", body)

@@ -710,15 +710,15 @@ def build_plan(sym, px, ear, w, bias, follow, df, today, events, strat=None, tfc
     if tfc:
         aligned = all(v == ("G" if d == "LONG" else "R") for k, v in tfc["tfs"].items() if k in ("M", "W"))
         ck.append((aligned, f"Continuity: Month & Week {'green' if d == 'LONG' else 'red'} at entry "
-                            f"(now Q{tfc['tfs']['Q']} M{tfc['tfs']['M']} W{tfc['tfs']['W']} D{tfc['tfs']['D']}) (re-check at 10:00)"))
+                            f"(now Q{tfc['tfs']['Q']} M{tfc['tfs']['M']} W{tfc['tfs']['W']} D{tfc['tfs']['D']}) (re-check at 9:50)"))
     b = plan["strat_best"]
     ck.append((b is not None, f"Strat trigger in force: {b['tf']} {b['name']} — enter only when price trades through "
                               f"{fmt(b['trigger'])}; stop {fmt(b['stop'])}" if b else
                "Strat trigger: none within reach that gives 3:1 — wait for a new inside bar / reversal on D–9D"))
     ck.append((plan["rr_ok"] or b is not None, "Risk:reward ≥ 3:1 to T1 (or T2 with a partial at T1)"))
     ck.append((any(f["opened"] and f["sign"] == (1 if d == "LONG" else -1) for f in follow),
-               "Flow confirmation: flagged flow on your side opened new positions (OI up). The 10:00 check confirms it"))
-    ck.append((None, "Don't chase: if price is more than ½ ATR past the trigger by 10:00, wait for a re-test or skip"))
+               "Flow confirmation: flagged flow on your side opened new positions (OI up). The 9:50 morning check confirms it"))
+    ck.append((None, "Don't chase: if price is more than ½ ATR past the trigger at the 9:50 check, wait for a re-test or skip"))
     plan["checklist"] = ck
 
     # event warnings
@@ -873,7 +873,7 @@ def main():
 
 
 # ----------------------------------------------------------------------------
-# 10:00 am check: first 30 minutes vs last night's plans + overnight OI + early flow
+# 9:50 am morning check: opening range vs last night's plans + overnight OI + early flow
 # ----------------------------------------------------------------------------
 def intraday(tk):
     h = retry(tk.history, period="1d", interval="1m")
