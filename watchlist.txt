@@ -1,0 +1,25 @@
+# One ticker per line. Lines starting with # are ignored.
+# Stocks that reported earnings in the last ~6 days (>$10B market cap) are added automatically every night.
+# Index ETFs (good for market-wide walls)
+SPY
+QQQ
+IWM
+# Core holdings
+ANET
+LLY
+NVDA
+MU
+GOOGL
+AMD
+AAPL
+AVGO
+MSFT
+TSLA
+NBIS
+PLTR
+# Liquid names worth watching
+META
+AMZN
+NFLX
+ORCL
+CRM
