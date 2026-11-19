@@ -360,9 +360,21 @@ MEANING = {("C", "BOUGHT"): ("Calls bought", 1), ("C", "SOLD"): ("Calls sold", -
            ("P", "BOUGHT"): ("Puts bought", -1), ("P", "SOLD"): ("Puts sold", 1)}
 
 
-def unusual_flow(df, today):
+def contract_role(adelta):
+    if adelta >= 0.80:
+        return "Deep ITM"      # behaves like stock: replacement, hedge, or a spread leg — not a bet
+    if adelta < 0.10:
+        return "Lottery"       # far out of the money, tiny probability — low weight
+    return "Directional"
+
+
+def unusual_flow(df, today, spot=None):
     d = df.copy()
     d["premium"] = d["volume"] * d["mid"] * 100
+    if "delta" not in d.columns:
+        T = d["dte"].clip(lower=1) / 365
+        ivs = pd.to_numeric(d.get("impliedVolatility"), errors="coerce").fillna(0.3).clip(0.05, 3.0)
+        d["delta"] = [bs(spot, k, t, iv, cp)[1] for k, t, iv, cp in zip(d["strike"], T, ivs, d["cp"])]
     new_pos = (d["volume"] >= UNUSUAL_MIN_VOLUME) & (d["volume"] >= UNUSUAL_VOL_OI * d["openInterest"].clip(lower=1)) \
         & (d["premium"] >= UNUSUAL_MIN_PREMIUM)
     big = d["premium"] >= BIG_PREMIUM
@@ -370,22 +382,107 @@ def unusual_flow(df, today):
     top &= d["premium"] >= TOP_PREMIUM_MIN
     d["why"] = np.where(new_pos, "volume over open interest", np.where(big, "$1M+ premium", "top premium today"))
     u = d[new_pos | big | top].sort_values("premium", ascending=False).head(12)
-    rows, bull, bear = [], 0.0, 0.0
+    rows = []
     for _, r in u.iterrows():
         lean, pos = side_lean(r)
         label, sign = MEANING.get((r["cp"], lean), ("Unclear side", 0))
-        if sign > 0:
-            bull += r["premium"]
-        elif sign < 0:
-            bear += r["premium"]
+        delta = float(r["delta"])
+        side_sign = 1 if lean == "BOUGHT" else -1 if lean == "SOLD" else 0
         rows.append(dict(contract=r.get("contractSymbol", ""), cp=r["cp"], strike=float(r["strike"]), expiry=r["expiry"],
                          dte=int(r["dte"]), volume=int(r["volume"]), oi=int(r["openInterest"]),
                          vol_oi=r["volume"] / max(r["openInterest"], 1), premium=float(r["premium"]),
-                         lean=lean, label=label, sign=sign, pos=pos, bid=r["bid"], ask=r["ask"], last=r["lastPrice"],
-                         why=r["why"]))
+                         lean=lean, label=label, sign=sign, pos=pos, bid=float(r["bid"]), ask=float(r["ask"]),
+                         last=float(r["lastPrice"]), why=r["why"], delta=delta, role=contract_role(abs(delta)),
+                         dnotional=side_sign * delta * r["volume"] * 100 * (spot or 0),
+                         spread_pct=(r["ask"] - r["bid"]) / ((r["ask"] + r["bid"]) / 2) if r["bid"] > 0 and r["ask"] > 0 else None))
+    # pair up likely spreads: same expiry and type, similar size, one bought and one sold
+    for i, a in enumerate(rows):
+        for b in rows[i + 1:]:
+            if a["role"] == "Spread leg" or b["role"] == "Spread leg":
+                continue
+            if a["expiry"] == b["expiry"] and a["cp"] == b["cp"] and {a["lean"], b["lean"]} == {"BOUGHT", "SOLD"} \
+                    and 0.8 <= a["volume"] / max(b["volume"], 1) <= 1.25:
+                for x in (a, b):
+                    x["role"] = "Spread leg"
+                bought, sold = (a, b) if a["lean"] == "BOUGHT" else (b, a)
+                bought["spread_net"] = bought["premium"] - sold["premium"]
+                bought["pair"] = f"{sold['strike']:g}{sold['cp']}"
+    bull = bear = 0.0
+    for r in rows:
+        if r["sign"] == 0:
+            continue
+        if r["role"] == "Directional":
+            amt = r["premium"]
+        elif r["role"] == "Spread leg" and r.get("spread_net"):
+            amt = abs(r["spread_net"])
+        else:
+            continue
+        if r["sign"] > 0:
+            bull += amt
+        else:
+            bear += amt
     tot = bull + bear
     bias = (bull - bear) / tot if tot else 0.0
     return rows, bias, bull, bear
+
+
+def institutional_read(rows, spot, bull, bear):
+    """Plain-English read of the flagged flow, the way a desk would summarize it."""
+    def short_exp(e):
+        d = dt.date.fromisoformat(e)
+        return f"{d.strftime('%b')} {d.day}"
+    dirs = [r for r in rows if r["role"] in ("Directional", "Spread leg") and r["sign"] != 0]
+    net_delta = sum(r["dnotional"] for r in rows if r["role"] in ("Directional", "Spread leg"))
+    deep = sum(r["premium"] for r in rows if r["role"] == "Deep ITM")
+    unclear = sum(r["premium"] for r in rows if r["sign"] == 0 and r["role"] != "Deep ITM")
+    tot = bull + bear
+    if tot < 250_000:
+        stance = "Quiet"
+    elif bull >= 2 * bear:
+        stance = "Bullish"
+    elif bear >= 2 * bull:
+        stance = "Bearish"
+    else:
+        stance = "Mixed"
+    out = dict(stance=stance, bull=bull, bear=bear, net_delta=net_delta, deep=deep, unclear=unclear, lines=[], follow=None)
+    L = out["lines"]
+    if stance == "Quiet":
+        L.append("No meaningful one-sided options positioning.")
+    elif stance == "Mixed":
+        L.append(f"Mixed: {money(bull)} bullish vs {money(bear)} bearish. No clear institutional edge.")
+    else:
+        word = "bullish" if stance == "Bullish" else "bearish"
+        L.append(f"Big money leans {word}: {money(bull)} bullish vs {money(bear)} bearish in directional bets.")
+    if abs(net_delta) >= 1_000_000:
+        L.append(f"Delta-adjusted, that's about {money(abs(net_delta))} of stock {'bought' if net_delta > 0 else 'sold'}.")
+    want = 1 if stance == "Bullish" else -1 if stance == "Bearish" else 0
+    if want:
+        cands = [r for r in dirs if r["sign"] == want and r["lean"] == "BOUGHT" and r["role"] == "Directional"]
+        if cands:
+            t = max(cands, key=lambda r: r["premium"])
+            kind = "calls" if t["cp"] == "C" else "puts"
+            k_, ex_ = f"${t['strike']:g}", short_exp(t["expiry"])
+            if t["cp"] == "C":
+                aim = f"betting it holds above {k_} through {ex_}" if t["strike"] <= spot else f"positioned for {k_}+ by {ex_}"
+            else:
+                aim = f"betting it stays below {k_} through {ex_}" if t["strike"] >= spot else f"positioned for a drop below {k_} by {ex_}"
+            L.append(f"Biggest bet: {ex_} {k_} {kind}, {money(t['premium'])} bought. They're {aim}.")
+            out["follow"] = dict(expiry=t["expiry"], strike=t["strike"], cp=t["cp"])
+        exps = {}
+        for r in dirs:
+            if r["sign"] == want:
+                exps[r["expiry"]] = exps.get(r["expiry"], 0) + r["premium"]
+        if exps:
+            e_ = max(exps, key=exps.get)
+            out["main_expiry"] = e_
+    ign = []
+    if deep >= 500_000:
+        ign.append(f"{money(deep)} in deep in-the-money contracts (stock replacement or hedges)")
+    if unclear >= 500_000:
+        ign.append(f"{money(unclear)} where bought or sold couldn't be read")
+    if ign:
+        L.append("Not counted: " + "; ".join(ign) + ".")
+    return out
 
 
 def oi_followup(sym, df):
@@ -712,7 +809,13 @@ def build_plan(sym, px, ear, w, bias, follow, df, today, events, strat=None, tfc
     _b = plan["strat_best"]
     plan["use_entry"] = _b["trigger"] if _b else plan["entry"]
     plan["use_stop"] = _b["stop"] if _b else plan["stop"]
-    plan["option"] = option_idea(d, plan["use_entry"], plan["use_stop"], t1, t2, df, today, ear)
+    inst = (flowx or {}).get("inst") or {}
+    side_stance = "Bullish" if d == "LONG" else "Bearish"
+    prefer = inst.get("follow") if inst.get("stance") == side_stance else None
+    plan["option"] = option_idea(d, plan["use_entry"], plan["use_stop"], t1, t2, df, today, ear, prefer)
+    plan["inst"] = inst
+    plan["flow_conflict"] = inst.get("stance") in ("Bullish", "Bearish") and inst.get("stance") != side_stance \
+        and max(inst.get("bull", 0), inst.get("bear", 0)) >= BIG_PREMIUM
     ck = []
     if tfc:
         aligned = all(v == ("G" if d == "LONG" else "R") for k, v in tfc["tfs"].items() if k in ("M", "W"))
@@ -789,6 +892,8 @@ def rank_plan(plan, px, flowx, follow, tfc, iv_info):
     pts.append((ivp, "Implied vs realized volatility"))
     rank = sum(p for p, _ in pts)
     # penalties and caps
+    if plan.get("flow_conflict"):
+        rank -= 15; pts.append((-15, "Big money is positioned the other way"))
     if any("Earnings in" in w for w in plan.get("warnings", [])):
         rank -= 15; pts.append((-15, "Earnings within 14 days"))
     if plan["direction"] == "WATCH":
@@ -800,7 +905,7 @@ def rank_plan(plan, px, flowx, follow, tfc, iv_info):
     return int(round(max(0, min(100, rank)))), pts
 
 
-def option_idea(side, entry, stop, t1, t2, df, today, ear):
+def option_idea(side, entry, stop, t1, t2, df, today, ear, prefer=None):
     if df is None:
         return None
     cp = "C" if side == "LONG" else "P"
@@ -825,6 +930,13 @@ def option_idea(side, entry, stop, t1, t2, df, today, ear):
     cand["fit"] = (cand["adelta"] - 0.60).abs() * 2 + cand["spread_pct"] * 3 + (cand["dte"] - 35).abs() / 60
     pool = cand[cand["liquid"]] if cand["liquid"].any() else cand
     longk = pool.sort_values("fit").iloc[0]
+    source = "Closest liquid contract near 0.60 delta, about 5 weeks out"
+    if prefer:
+        # follow the money: use the exact contract institutions bought if it's liquid and a sensible delta/expiry
+        pm = cand[(cand["expiry"] == prefer["expiry"]) & (cand["strike"] == prefer["strike"]) & (cand["cp"] == prefer["cp"])]
+        if len(pm) and bool(pm.iloc[0]["liquid"] or (pm.iloc[0]["spread_pct"] <= MAX_SPREAD_PCT and pm.iloc[0]["adelta"] >= 0.30)):
+            longk = pm.iloc[0]
+            source = "Same contract the big money bought"
     exp = longk["expiry"]
     ch = win[win.expiry == exp].copy()
     dte = int(longk["dte"])
@@ -845,7 +957,9 @@ def option_idea(side, entry, stop, t1, t2, df, today, ear):
                   rr=(v_t1 - cost) / max(cost - v_st, 0.01),
                   rr_entry=(v_t1 - v_en) / max(v_en - v_st, 0.01), iv=iv, dte=dte, expiry=exp,
                   spread=cost - float(longk["bid"]), spread_pct=float(longk["spread_pct"]),
-                  oi=int(longk["openInterest"]), vol=int(longk["volume"]), liquid=bool(longk["liquid"]))
+                  oi=int(longk["openInterest"]), vol=int(longk["volume"]),
+                  liquid=bool(longk["liquid"] or longk["spread_pct"] <= MAX_SPREAD_PCT), source=source,
+                  strike=float(longk["strike"]), cp=cp, contract=str(longk.get("contractSymbol", "")))
 
     # debit spread capped at the wall/target
     shorts = ch[(ch["strike"] > longk["strike"]) if cp == "C" else (ch["strike"] < longk["strike"])]
@@ -889,11 +1003,12 @@ def scan_one(sym, today, events):
     if df is None or not len(df):
         raise RuntimeError("no listed options in range")
     w = walls(df, px["spot"])
-    flow, bias, bull, bear = unusual_flow(df, today)
+    flow, bias, bull, bear = unusual_flow(df, today, px["spot"])
+    inst = institutional_read(flow, px["spot"], bull, bear)
     follow = oi_followup(sym, df)
     totals = premium_totals(df, px["spot"])
     flowx = premium_surge(sym, totals)
-    flowx.update(bias=bias, bull=bull, bear=bear)
+    flowx.update(bias=bias, bull=bull, bear=bear, inst=inst)
     atm = df[(df.cp == "C") & (df.dte >= 20)]
     iv_info = dict(atm_iv=None, hv=px["hv20"], ratio=None, level="", iv_rank=None)
     if len(atm):
@@ -969,8 +1084,12 @@ def main():
                          t1=p["t1"], t2=p["t2"], trigger=p["trigger"], atr=r["px"]["atr"], last=r["px"]["spot"],
                          d_high=r["strat"].get("D", {}).get("high"), d_low=r["strat"].get("D", {}).get("low"),
                          best=p.get("strat_best"), flow=r["flow"], post=p["post_earnings"],
-                         contract=((p.get("option") or {}).get("single") or {}).get("label")))
-    (REPORT_DIR / "plans_latest.json").write_text(json.dumps(dict(date=today.isoformat(), plans=keep), default=float))
+                         contract=((p.get("option") or {}).get("single") or {}).get("label"),
+                         option=(p.get("option") or {}).get("single"), use_entry=p.get("use_entry"), use_stop=p.get("use_stop"),
+                         warnings=p.get("warnings", []), inst_lines=(p.get("inst") or {}).get("lines", []),
+                         inst_stance=(p.get("inst") or {}).get("stance"), flow_conflict=p.get("flow_conflict", False)))
+    (REPORT_DIR / "plans_latest.json").write_text(json.dumps(dict(date=today.isoformat(), generated=dt.datetime.now().isoformat(),
+                                                                  after_close=dt.datetime.now().hour >= 16, plans=keep), default=float))
     with open(REPORT_DIR / f"plan_{today.isoformat()}.csv", "w", newline="") as f:
         wr = csv.writer(f)
         wr.writerow(["ticker", "rank", "direction", "post_earnings", "score", "last", "trigger", "stop", "t1", "t2", "rr_t1", "rr_t2",
@@ -1043,6 +1162,35 @@ def classify_open(p, h):
                 trig=trig, stop=stop, t1=t1, orh=orh, orl=orl, rr_now=rr_now)
 
 
+def plan_action(p, row, live):
+    """One plain instruction for the morning, plus the ticket details."""
+    opt = p.get("option") or {}
+    sym, long_ = p["sym"], p["side"] == "LONG"
+    name = f"{sym} {opt['label']}" if opt.get("label") else None
+    px = live["mid"] if live and live["mid"] > 0 else None
+    limit = f"limit {fmt(px)} or less" if px else "use a limit order at the mid price"
+    st = row["state"]
+    if not name:
+        act, kind = "No liquid contract for this plan. Skip it.", "no"
+    elif st == "Triggered":
+        act, kind = f"BUY NOW: {name}, {limit}.", "go"
+    elif st == "Waiting":
+        act, kind = (f"WAIT: set an alert at {fmt(row['trig'])}. Buy {name} only when {sym} trades "
+                     f"{'above' if long_ else 'below'} it."), "wait"
+    elif st == "Extended":
+        act, kind = f"DON'T CHASE: buy {name} only on a pullback toward {fmt(row['trig'])}.", "wait"
+    else:
+        act, kind = "NO TRADE today: the setup failed or already hit its level.", "no"
+    am = row.get("inst_am") or {}
+    want = "Bullish" if long_ else "Bearish"
+    if kind in ("go", "wait") and am.get("stance") in ("Bullish", "Bearish") and am["stance"] != want:
+        act += " Caution: this morning's options flow leans the other way."
+    if kind in ("go", "wait") and p.get("flow_conflict"):
+        act += " Last night's big money was positioned against this trade."
+    return dict(action=act, action_kind=kind, opt=opt, live=live, t2=p.get("t2"),
+                warnings=p.get("warnings", []), inst_lines=p.get("inst_lines", []))
+
+
 def check():
     f = REPORT_DIR / "plans_latest.json"
     if not f.exists():
@@ -1066,10 +1214,14 @@ def check():
             log(f"  {p['sym']}: {ex}"); continue
         if h is None:
             continue
-        rows.append(classify_open(p, h))
+        row = classify_open(p, h)
+        rows.append(row)
         # OI follow-up on last night's flagged contracts + early flow on the same expirations
         flagged = p.get("flow") or []
         exps = list(dict.fromkeys(x["expiry"] for x in flagged))[:2]
+        opt = p.get("option") or {}
+        if opt.get("expiry") and opt["expiry"] not in exps:
+            exps.append(opt["expiry"])
         if p["direction"] != "WATCH" and not exps:
             try:
                 exps = [e for e in retry(lambda: tk.options)
@@ -1094,22 +1246,24 @@ def check():
                 ratio = chg / max(x["volume"], 1)
                 oi_rows.append(dict(sym=p["sym"], c=f"{x['expiry']} {x['strike']:g}{x['cp']}", label=x["label"], vol=x["volume"],
                                     chg=chg, v="Opened, confirmed" if ratio >= 0.5 else "Closed, ignore" if chg < 0 else "Mixed"))
+        live = None
         if frames:
             df = pd.concat(frames, ignore_index=True)
-            for c in ("volume", "openInterest", "bid", "ask", "lastPrice"):
+            for c in ("volume", "openInterest", "bid", "ask", "lastPrice", "impliedVolatility"):
                 df[c] = pd.to_numeric(df.get(c), errors="coerce").fillna(0.0)
             df["mid"] = np.where((df["bid"] > 0) & (df["ask"] > 0), (df["bid"] + df["ask"]) / 2, df["lastPrice"])
-            df["premium"] = df["volume"] * df["mid"] * 100
-            hot = df[(df["volume"] >= UNUSUAL_MIN_VOLUME) & (df["premium"] >= UNUSUAL_MIN_PREMIUM)].sort_values("premium", ascending=False).head(6)
-            ef = []
-            for _, r in hot.iterrows():
-                lean, _ = side_lean(r)
-                label, _ = MEANING.get((r["cp"], lean), ("Unclear side", 0))
-                ef.append(dict(expiry=r["expiry"], strike=float(r["strike"]), cp=r["cp"], volume=int(r["volume"]),
-                               oi=int(r["openInterest"]), premium=float(r["premium"]), label=label))
+            ef, _, eb, er = unusual_flow(df, today, row["now"])
             if ef:
                 early[p["sym"]] = ef
-    now_str = dt.datetime.now().strftime("%-I:%M %p").lower()
+                row["inst_am"] = institutional_read(ef, row["now"], eb, er)
+            if opt.get("contract"):
+                m = df[df["contractSymbol"] == opt["contract"]]
+                if len(m):
+                    q = m.iloc[0]
+                    live = dict(bid=float(q["bid"]), ask=float(q["ask"]), last=float(q["lastPrice"]),
+                                mid=float(q["mid"]), vol=int(q["volume"]))
+        row.update(plan_action(p, row, live))
+        now_str = dt.datetime.now().strftime("%-I:%M %p").lower()
     page = SR.render_check(rows, oi_rows, early, futs, stale and bool(oi_rows), data["date"], today, now_str)
     publish_housekeeping()
     (SITE_DIR / "check.html").write_text(page)

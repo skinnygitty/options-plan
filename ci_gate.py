@@ -13,7 +13,9 @@ REPORTS = Path("reports")
 
 def ran_evening(day):
     try:
-        return json.loads((REPORTS / "plans_latest.json").read_text()).get("date") == day
+        d = json.loads((REPORTS / "plans_latest.json").read_text())
+        # a manual run earlier in the day doesn't count; only a scan made after the close does
+        return d.get("date") == day and d.get("after_close", True)
     except Exception:
         return False
 
