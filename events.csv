@@ -1,0 +1,6 @@
+# date,ticker,event   — use * as the ticker for market-wide events. Add investor conferences / analyst days here.
+# Events within 14 days show up as cautions on each trade plan.
+date,ticker,event
+2026-11-20,*,Monthly options expiration — big OI rolls off; walls can shift next week
+2026-12-09,*,FOMC rate decision 2:00 pm ET (with dot plot)
+2026-12-18,*,Quarterly "triple witching" expiration — walls reset afterward

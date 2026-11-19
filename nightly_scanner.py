@@ -1,0 +1,961 @@
+#!/usr/bin/env python3
+"""
+Nightly Options Scanner  (Yahoo Finance via yfinance — no API key needed)
+=========================================================================
+Run after the close (e.g. 6:30 pm ET). Builds docs/index.html (and docs/check.html at 10 am) with a
+trade plan for each ticker: earnings/event context, call & put walls,
+unusual-flow lean (bought vs sold), and a 3:1–4:1 risk/reward plan.
+
+IMPORTANT LIMITS OF FREE DATA
+- Yahoo does not publish trade-by-trade prints, so NOTHING free can tell you
+  for certain whether a contract was bought or sold. This script uses two
+  proxies and labels them as a "lean", never a fact:
+    1. Where the LAST trade printed inside the bid/ask (near ask = bought,
+       near bid = sold).
+    2. Next-day open-interest follow-up: if OI jumps by roughly the prior
+       day's volume, the trades OPENED new positions (real conviction);
+       if OI falls, they were closing trades (ignore them).
+- Open interest on Yahoo updates once a day (morning), so walls reflect
+  positioning as of the prior close.
+- Gamma (GEX) walls assume the textbook dealer positioning (customers buy
+  calls and buy puts). Treat them as zones, not exact prices.
+"""
+
+import csv
+import datetime as dt
+import html
+import json
+import math
+import os
+import sys
+import time
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import yfinance as yf
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import site_render as SR
+
+# ----------------------------------------------------------------------------
+# SETTINGS — edit freely
+# ----------------------------------------------------------------------------
+HERE = Path(__file__).resolve().parent
+WATCHLIST_FILE = HERE / "watchlist.txt"      # one ticker per line
+EVENTS_FILE = HERE / "events.csv"            # date,ticker,event  (ticker * = market-wide)
+SNAP_DIR = HERE / "snapshots"                # nightly chain snapshots (for OI follow-up)
+REPORT_DIR = HERE / "reports"
+SITE_DIR = Path(os.environ.get("SITE_DIR", HERE / "docs"))   # what GitHub Pages publishes (main branch, /docs)
+KEEP_REPORT_DAYS = 30
+
+DISCOVER_RECENT_EARNINGS = True   # add stocks that just reported (from Yahoo's earnings calendar)
+DISCOVER_MIN_MCAP = 10e9          # only large caps with liquid options
+DISCOVER_LOOKBACK_DAYS = 6        # calendar days back to look for reporters
+MAX_DISCOVERED = 40
+
+POST_EARNINGS_MAX_BARS = 7        # treat as "post-earnings" for up to 7 sessions after the reaction day
+MIN_DTE, MAX_DTE = 5, 60          # expirations used for walls + flow
+MAX_EXPIRATIONS = 6               # cap requests per ticker
+PLAN_DTE_RANGE = (21, 60)         # expiration window for the suggested option trade
+HOLD_DAYS_ASSUMED = 7             # option R:R estimates assume you hit target/stop within ~a week
+
+UNUSUAL_MIN_VOLUME = 300
+UNUSUAL_VOL_OI = 1.25             # volume / open interest
+UNUSUAL_MIN_PREMIUM = 50_000      # $ notional (volume * mid * 100)
+
+MIN_RR, IDEAL_RR = 3.0, 4.0
+RISK_FREE = 0.04
+SLEEP = 0.35                      # seconds between Yahoo requests (be polite / avoid throttling)
+
+DEFAULT_WATCHLIST = ["SPY", "QQQ", "IWM", "ANET", "LLY", "NVDA", "MU", "GOOGL", "AMD",
+                     "AAPL", "AVGO", "MSFT", "TSLA", "NBIS", "PLTR", "META", "AMZN"]
+
+# ----------------------------------------------------------------------------
+# Small helpers
+# ----------------------------------------------------------------------------
+def log(*a):
+    print(dt.datetime.now().strftime("%H:%M:%S"), *a, flush=True)
+
+
+def retry(fn, *a, tries=4, **k):
+    for i in range(tries):
+        try:
+            out = fn(*a, **k)
+            time.sleep(SLEEP)
+            return out
+        except Exception as e:  # network hiccups / throttling
+            if i == tries - 1:
+                raise
+            limited = "RateLimit" in type(e).__name__ or "Too Many Requests" in str(e)
+            time.sleep((30 if limited else 2) * (i + 1))
+
+
+def ncdf(x):
+    return 0.5 * (1 + math.erf(x / math.sqrt(2)))
+
+
+def npdf(x):
+    return math.exp(-0.5 * x * x) / math.sqrt(2 * math.pi)
+
+
+def bs(S, K, T, iv, cp, r=RISK_FREE):
+    """Black-Scholes price, delta, gamma. cp = 'C' or 'P'."""
+    T = max(T, 1 / 365)
+    iv = max(iv, 0.01)
+    d1 = (math.log(S / K) + (r + 0.5 * iv * iv) * T) / (iv * math.sqrt(T))
+    d2 = d1 - iv * math.sqrt(T)
+    if cp == "C":
+        price = S * ncdf(d1) - K * math.exp(-r * T) * ncdf(d2)
+        delta = ncdf(d1)
+    else:
+        price = K * math.exp(-r * T) * ncdf(-d2) - S * ncdf(-d1)
+        delta = ncdf(d1) - 1
+    gamma = npdf(d1) / (S * iv * math.sqrt(T))
+    return price, delta, gamma
+
+
+def fmt(x, nd=2, pre="$"):
+    if x is None or (isinstance(x, float) and (math.isnan(x) or math.isinf(x))):
+        return "—"
+    return f"{pre}{x:,.{nd}f}"
+
+
+def money(x):
+    if x is None or (isinstance(x, float) and math.isnan(x)):
+        return "—"
+    for unit, div in (("B", 1e9), ("M", 1e6), ("K", 1e3)):
+        if abs(x) >= div:
+            return f"${x / div:,.1f}{unit}"
+    return f"${x:,.0f}"
+
+
+# ----------------------------------------------------------------------------
+# Universe & events
+# ----------------------------------------------------------------------------
+def load_watchlist():
+    if WATCHLIST_FILE.exists():
+        rows = [l.split("#")[0].strip().upper() for l in WATCHLIST_FILE.read_text().splitlines()]
+        tick = [r for r in rows if r]
+        if tick:
+            return tick
+    return list(DEFAULT_WATCHLIST)
+
+
+def load_events():
+    ev = []
+    if EVENTS_FILE.exists():
+        with open(EVENTS_FILE, newline="") as f:
+            for row in csv.DictReader(l for l in f if not l.lstrip().startswith("#")):
+                try:
+                    d = dt.date.fromisoformat(row["date"].strip())
+                    ev.append((d, row["ticker"].strip().upper(), row["event"].strip()))
+                except Exception:
+                    continue
+    return ev
+
+
+def discover_earnings(today):
+    """Large caps that reported recently (to scan) and those reporting soon (to avoid)."""
+    recent, upcoming = [], []
+    if not DISCOVER_RECENT_EARNINGS:
+        return recent, upcoming
+    try:
+        cal = yf.Calendars()
+        df = retry(cal.get_earnings_calendar, market_cap=DISCOVER_MIN_MCAP, filter_most_active=False,
+                   start=str(today - dt.timedelta(days=DISCOVER_LOOKBACK_DAYS)), end=str(today), limit=100)
+        if df is not None and len(df):
+            recent = [s for s in df.index.astype(str).unique() if s.isalpha()][:MAX_DISCOVERED]
+        df2 = retry(cal.get_earnings_calendar, market_cap=DISCOVER_MIN_MCAP, filter_most_active=False,
+                    start=str(today + dt.timedelta(days=1)), end=str(today + dt.timedelta(days=10)), limit=100)
+        if df2 is not None and len(df2):
+            for sym, r in df2.iterrows():
+                d = pd.to_datetime(r.get("Event Start Date")).date() if r.get("Event Start Date") is not None else None
+                upcoming.append((str(sym), d, str(r.get("Timing", "") or "")))
+    except Exception as e:
+        log("Earnings-calendar discovery skipped:", e)
+    return recent, upcoming
+
+
+# ----------------------------------------------------------------------------
+# Price structure
+# ----------------------------------------------------------------------------
+def price_context(hist):
+    h = hist.copy()
+    pc = h["Close"].shift(1)
+    tr = pd.concat([h["High"] - h["Low"], (h["High"] - pc).abs(), (h["Low"] - pc).abs()], axis=1).max(axis=1)
+    atr = tr.rolling(14).mean().iloc[-1]
+    rets = np.log(h["Close"]).diff()
+    hv20 = rets.tail(20).std() * math.sqrt(252)
+    wk = h["Close"].resample("W-FRI").last().dropna()
+    e10, e21, e72 = (wk.ewm(span=s, adjust=False).mean().iloc[-1] for s in (10, 21, 72))
+    if e21 > e72 and e10 >= e72 * 1.06:
+        trend = "Weekly uptrend (21>72, 10 EMA ≥6% over 72)"
+        tscore = 1
+    elif e21 > e72:
+        trend = "Weekly 21>72 but momentum not confirmed"
+        tscore = 0.5
+    elif e21 < e72:
+        trend = "Weekly downtrend (21<72)"
+        tscore = -1
+    else:
+        trend, tscore = "Flat", 0
+    return dict(spot=float(h["Close"].iloc[-1]), atr=float(atr), hv20=float(hv20),
+                swing_low=float(h["Low"].tail(10).min()), swing_high=float(h["High"].tail(10).max()),
+                trend=trend, tscore=tscore, last_date=h.index[-1].date())
+
+
+def earnings_context(tk, hist, today):
+    out = dict(last_earn=None, next_earn=None, reaction=None)
+    try:
+        ed = retry(tk.get_earnings_dates, limit=8)
+    except Exception:
+        ed = None
+    if ed is not None and len(ed):
+        dates = sorted({pd.Timestamp(i).tz_localize(None).normalize() if pd.Timestamp(i).tzinfo else pd.Timestamp(i).normalize()
+                        for i in ed.index})
+        past = [d for d in dates if d.date() <= today]
+        fut = [d for d in dates if d.date() > today]
+        out["last_earn"] = past[-1].date() if past else None
+        out["next_earn"] = fut[0].date() if fut else None
+        if past:
+            row = ed[[ (pd.Timestamp(i).tz_localize(None) if pd.Timestamp(i).tzinfo else pd.Timestamp(i)).normalize() == past[-1] for i in ed.index]]
+            if len(row):
+                r = row.iloc[0]
+                out["eps_est"] = r.get("EPS Estimate")
+                out["eps_act"] = r.get("Reported EPS")
+                out["surprise"] = r.get("Surprise(%)")
+    if out["next_earn"] is None:
+        try:
+            cal = retry(lambda: tk.calendar)
+            ne = cal.get("Earnings Date") if isinstance(cal, dict) else None
+            if ne:
+                nd = [d for d in ne if d > today]
+                out["next_earn"] = nd[0] if nd else None
+            out["ex_div"] = cal.get("Ex-Dividend Date") if isinstance(cal, dict) else None
+        except Exception:
+            pass
+
+    # Reaction day = whichever of (earnings day, next session) gapped most — robust to BMO/AMC ambiguity
+    if out["last_earn"]:
+        idx = hist.index.tz_localize(None).normalize() if hist.index.tz is not None else hist.index.normalize()
+        e = pd.Timestamp(out["last_earn"])
+        cands = [i for i in range(1, len(idx)) if idx[i] >= e][:2]
+        best = None
+        for i in cands:
+            gap = hist["Open"].iloc[i] / hist["Close"].iloc[i - 1] - 1
+            if best is None or abs(gap) > abs(best[1]):
+                best = (i, gap)
+        if best:
+            i, gap = best
+            prev = hist["Close"].iloc[i - 1]
+            rday = hist.iloc[i]
+            bars_since = len(hist) - 1 - i
+            last = hist["Close"].iloc[-1]
+            move = rday["Close"] / prev - 1
+            mid = (rday["High"] + rday["Low"]) / 2
+            if move > 0:
+                held = last >= mid
+            else:
+                held = last <= mid
+            out["reaction"] = dict(date=idx[i].date(), gap=gap, move=move, high=float(rday["High"]),
+                                   low=float(rday["Low"]), prev_close=float(prev), bars_since=bars_since,
+                                   held=bool(held), since=last / prev - 1)
+    return out
+
+
+# ----------------------------------------------------------------------------
+# Options: chains, walls, flow
+# ----------------------------------------------------------------------------
+def load_chains(tk, spot, today):
+    exps = []
+    for e in retry(lambda: tk.options):
+        d = dt.date.fromisoformat(e)
+        dte = (d - today).days
+        if MIN_DTE <= dte <= MAX_DTE:
+            exps.append((e, dte))
+    # keep the nearest few + make sure one is in the plan window
+    chosen = exps[:MAX_EXPIRATIONS]
+    if not any(PLAN_DTE_RANGE[0] <= d <= PLAN_DTE_RANGE[1] for _, d in chosen):
+        extra = [x for x in exps if PLAN_DTE_RANGE[0] <= x[1] <= PLAN_DTE_RANGE[1]]
+        if extra:
+            chosen.append(extra[0])
+    frames = []
+    for e, dte in chosen:
+        ch = retry(tk.option_chain, e)
+        for side, df in (("C", ch.calls), ("P", ch.puts)):
+            if df is None or not len(df):
+                continue
+            d = df.copy()
+            d["cp"], d["expiry"], d["dte"] = side, e, dte
+            frames.append(d)
+    if not frames:
+        return None
+    df = pd.concat(frames, ignore_index=True)
+    for c in ("volume", "openInterest", "bid", "ask", "lastPrice", "impliedVolatility"):
+        df[c] = pd.to_numeric(df.get(c), errors="coerce").fillna(0.0)
+    df = df[(df["strike"] > spot * 0.6) & (df["strike"] < spot * 1.4)].copy()
+    df["mid"] = np.where((df["bid"] > 0) & (df["ask"] > 0), (df["bid"] + df["ask"]) / 2, df["lastPrice"])
+    df["ivc"] = df["impliedVolatility"].clip(0.05, 3.0)
+    T = df["dte"].clip(lower=1) / 365
+    g = [bs(spot, k, t, iv, cp)[1:] for k, t, iv, cp in zip(df["strike"], T, df["ivc"], df["cp"])]
+    df["delta"] = [x[0] for x in g]
+    df["gamma"] = [x[1] for x in g]
+    # dollar gamma per 1% move; calls +, puts – (textbook dealer assumption)
+    df["gex"] = df["gamma"] * df["openInterest"] * 100 * spot * spot * 0.01 * np.where(df["cp"] == "C", 1, -1)
+    return df
+
+
+def walls(df, spot):
+    near = df[(df["strike"] > spot * 0.8) & (df["strike"] < spot * 1.2)]
+    by = near.groupby(["strike", "cp"]).agg(oi=("openInterest", "sum"), gex=("gex", "sum")).reset_index()
+    calls = by[by.cp == "C"].set_index("strike")
+    puts = by[by.cp == "P"].set_index("strike")
+    res = {}
+    c_up = calls[calls.index >= spot]
+    p_dn = puts[puts.index <= spot]
+    res["call_wall"] = float(c_up["gex"].idxmax()) if len(c_up) and c_up["gex"].max() > 0 else None
+    res["put_wall"] = float(p_dn["gex"].idxmin()) if len(p_dn) and p_dn["gex"].min() < 0 else None
+    res["call_wall_oi"] = float(c_up["oi"].idxmax()) if len(c_up) and c_up["oi"].max() > 0 else None
+    res["put_wall_oi"] = float(p_dn["oi"].idxmax()) if len(p_dn) and p_dn["oi"].max() > 0 else None
+    # second walls (for target 2)
+    if res["call_wall"]:
+        nxt = c_up[c_up.index > res["call_wall"] * 1.005]
+        res["call_wall2"] = float(nxt["gex"].idxmax()) if len(nxt) and nxt["gex"].max() > 0 else None
+    if res["put_wall"]:
+        nxt = p_dn[p_dn.index < res["put_wall"] * 0.995]
+        res["put_wall2"] = float(nxt["gex"].idxmin()) if len(nxt) and nxt["gex"].min() < 0 else None
+    net = by["gex"].sum()
+    res["net_gex"] = float(net)
+    res["regime"] = ("Positive gamma — dealers dampen moves; expect pinning between walls"
+                     if net > 0 else "Negative gamma — dealers amplify moves; breaks can run")
+    tot_c, tot_p = df.loc[df.cp == "C", "volume"].sum(), df.loc[df.cp == "P", "volume"].sum()
+    res["pc_vol"] = tot_p / tot_c if tot_c else None
+    return res
+
+
+def side_lean(r):
+    b, a, l = r["bid"], r["ask"], r["lastPrice"]
+    if b <= 0 or a <= 0 or a <= b or l <= 0:
+        return "UNCLEAR", None
+    pos = (l - b) / (a - b)
+    if pos >= 0.65:
+        return "BOUGHT", pos
+    if pos <= 0.35:
+        return "SOLD", pos
+    return "MID", pos
+
+
+MEANING = {("C", "BOUGHT"): ("Calls bought", 1), ("C", "SOLD"): ("Calls sold", -1),
+           ("P", "BOUGHT"): ("Puts bought", -1), ("P", "SOLD"): ("Puts sold", 1)}
+
+
+def unusual_flow(df, today):
+    d = df.copy()
+    d["premium"] = d["volume"] * d["mid"] * 100
+    m = (d["volume"] >= UNUSUAL_MIN_VOLUME) & (d["volume"] >= UNUSUAL_VOL_OI * d["openInterest"].clip(lower=1)) \
+        & (d["premium"] >= UNUSUAL_MIN_PREMIUM)
+    u = d[m].sort_values("premium", ascending=False).head(12)
+    rows, bull, bear = [], 0.0, 0.0
+    for _, r in u.iterrows():
+        lean, pos = side_lean(r)
+        label, sign = MEANING.get((r["cp"], lean), ("Unclear side", 0))
+        if sign > 0:
+            bull += r["premium"]
+        elif sign < 0:
+            bear += r["premium"]
+        rows.append(dict(contract=r.get("contractSymbol", ""), cp=r["cp"], strike=float(r["strike"]), expiry=r["expiry"],
+                         dte=int(r["dte"]), volume=int(r["volume"]), oi=int(r["openInterest"]),
+                         vol_oi=r["volume"] / max(r["openInterest"], 1), premium=float(r["premium"]),
+                         lean=lean, label=label, sign=sign, pos=pos, bid=r["bid"], ask=r["ask"], last=r["lastPrice"]))
+    tot = bull + bear
+    bias = (bull - bear) / tot if tot else 0.0
+    return rows, bias, bull, bear
+
+
+def oi_followup(sym, df):
+    """Compare today's OI with yesterday's flagged contracts → opened or closed?"""
+    prev_file = [f for f in sorted(SNAP_DIR.glob(f"{sym}_*.json")) if not f.stem.endswith(dt.date.today().isoformat())]
+    if not prev_file:
+        return []
+    try:
+        prev = json.loads(prev_file[-1].read_text())
+    except Exception:
+        return []
+    now_oi = dict(zip(df.get("contractSymbol", pd.Series(dtype=str)), df["openInterest"]))
+    out = []
+    for c in prev.get("unusual", []):
+        cs = c.get("contract")
+        if cs not in now_oi:
+            continue
+        chg = now_oi[cs] - c["oi"]
+        ratio = chg / max(c["volume"], 1)
+        verdict = "OPENED (new positions — conviction)" if ratio >= 0.5 else \
+                  "Mostly CLOSED (ignore as signal)" if chg < 0 else "Mixed / day-traded"
+        out.append(dict(contract=cs, label=c["label"], prev_vol=c["volume"], oi_change=int(chg),
+                        verdict=verdict, snap=prev.get("date"), sign=c.get("sign", 0), opened=ratio >= 0.5))
+    return out
+
+
+def save_snapshot(sym, today, flow_rows):
+    SNAP_DIR.mkdir(exist_ok=True)
+    (SNAP_DIR / f"{sym}_{today.isoformat()}.json").write_text(
+        json.dumps(dict(date=today.isoformat(), unusual=flow_rows), default=float))
+    old = sorted(SNAP_DIR.glob(f"{sym}_*.json"))[:-10]   # keep 10 nights
+    for f in old:
+        f.unlink(missing_ok=True)
+
+
+# ----------------------------------------------------------------------------
+# The Strat (Rob Smith): candle types, combos, actionable signals, FTFC
+# ----------------------------------------------------------------------------
+STRAT_TFS = ["D", "2D", "3D", "5D", "9D", "W"]   # hybrid N-day candles are built from daily bars
+TF_RANK = {tf: i for i, tf in enumerate(STRAT_TFS)}
+
+
+def _agg(g):
+    return pd.Series({"Open": g["Open"].iloc[0], "High": g["High"].max(), "Low": g["Low"].min(),
+                      "Close": g["Close"].iloc[-1], "End": g.index[-1], "n": len(g)})
+
+
+def make_bars(hist, tf):
+    h = hist[["Open", "High", "Low", "Close"]].copy()
+    h.index = h.index.tz_localize(None) if h.index.tz is not None else h.index
+    if tf == "D":
+        b = h.copy(); b["End"] = b.index; b["n"] = 1
+        return b.reset_index(drop=True)
+    if tf == "W":
+        b = h.groupby(h.index.to_period("W-FRI")).apply(_agg).reset_index(drop=True)
+        last = h.index[-1]
+        if last.weekday() != 4:            # current week still in progress → keep it but mark it
+            b.loc[b.index[-1], "n"] = -1
+        return b
+    n = int(tf[:-1])
+    # rolling N-session candles anchored to the latest close, so every candle is complete
+    k = (len(h) - 1 - np.arange(len(h))) // n
+    b = h.groupby(k).apply(_agg).iloc[::-1].reset_index(drop=True)
+    return b[b["n"] == n].reset_index(drop=True)
+
+
+def strat_type(cur, prev):
+    up, dn = cur["High"] > prev["High"], cur["Low"] < prev["Low"]
+    if up and dn:
+        return "3"
+    if up:
+        return "2U"
+    if dn:
+        return "2D"
+    return "1"
+
+
+def shape(bar):
+    rng = bar["High"] - bar["Low"]
+    if rng <= 0:
+        return None
+    body = abs(bar["Close"] - bar["Open"])
+    lower = min(bar["Open"], bar["Close"]) - bar["Low"]
+    upper = bar["High"] - max(bar["Open"], bar["Close"])
+    pos = (bar["Close"] - bar["Low"]) / rng
+    if lower >= 2 * max(body, rng * 0.05) and pos >= 0.6:
+        return "Hammer"
+    if upper >= 2 * max(body, rng * 0.05) and pos <= 0.4:
+        return "Shooter"
+    return None
+
+
+def strat_scan(hist):
+    """Returns per-timeframe sequence + actionable setups with trigger/stop."""
+    out = {}
+    for tf in STRAT_TFS:
+        b = make_bars(hist, tf)
+        in_prog = False
+        if tf == "W" and len(b) and b["n"].iloc[-1] == -1:
+            in_prog = True
+            cur_w = b.iloc[-1]
+            b = b.iloc[:-1].reset_index(drop=True)
+        if len(b) < 4:
+            continue
+        types = [strat_type(b.iloc[i], b.iloc[i - 1]) for i in range(len(b) - 3, len(b))]
+        L, P = b.iloc[-1], b.iloc[-2]
+        green = L["Close"] > L["Open"]
+        shp = shape(L)
+        seq = "-".join(types)
+        setups = []
+
+        def add(name, side, trig, stop, note=""):
+            setups.append(dict(tf=tf, name=name, side=side, trigger=float(trig), stop=float(stop), note=note))
+
+        t1, t2 = types[-1], types[-2]
+        if t1 == "1":
+            lead = {"2U": "2U-1", "2D": "2D-1", "3": "3-1", "1": "1-1"}[t2]
+            cont_l = "continuation" if t2 == "2U" else "reversal" if t2 == "2D" else ""
+            cont_s = "continuation" if t2 == "2D" else "reversal" if t2 == "2U" else ""
+            add(f"{lead}-2U {cont_l}".strip(), "LONG", L["High"], L["Low"], "Inside bar — take the break of its high")
+            add(f"{lead}-2D {cont_s}".strip(), "SHORT", L["Low"], L["High"], "Inside bar — take the break of its low")
+        if t1 == "2D" and t2 == "1":
+            add("1-2D-2U RevStrat", "LONG", L["High"], L["Low"])
+        if t1 == "2U" and t2 == "1":
+            add("1-2U-2D RevStrat", "SHORT", L["Low"], L["High"])
+        if t1 == "2D" and t2 == "3":
+            add("3-2D-2U reversal", "LONG", L["High"], L["Low"])
+        if t1 == "2U" and t2 == "3":
+            add("3-2U-2D reversal", "SHORT", L["Low"], L["High"])
+        if t1 == "2D" and t2 not in ("1", "3") and (green or shp == "Hammer"):
+            add("2-2 reversal (2D→2U)", "LONG", L["High"], L["Low"],
+                "Failed 2D (closed green)" if green else "Hammer on a 2D")
+        if t1 == "2U" and t2 not in ("1", "3") and ((not green) or shp == "Shooter"):
+            add("2-2 reversal (2U→2D)", "SHORT", L["Low"], L["High"],
+                "Failed 2U (closed red)" if not green else "Shooter on a 2U")
+        if t1 == "3":
+            add("3 outside bar → 3-2U", "LONG", L["High"], L["Low"], "Wide stop — better to wait for a 3-1-2")
+            add("3 outside bar → 3-2D", "SHORT", L["Low"], L["High"], "Wide stop — better to wait for a 3-1-2")
+        if shp == "Hammer" and t1 != "2D":
+            add("Hammer → 2U", "LONG", L["High"], L["Low"])
+        if shp == "Shooter" and t1 != "2U":
+            add("Shooter → 2D", "SHORT", L["Low"], L["High"])
+        signal = []
+        if t1 == "1": signal.append("Inside bar")
+        if shp: signal.append(shp)
+        if t1 == "2U" and not green: signal.append("Failed 2U (2U red)")
+        if t1 == "2D" and green: signal.append("Failed 2D (2D green)")
+        if t1 == "3": signal.append("Outside bar")
+        out[tf] = dict(seq=seq, last=t1, color="green" if green else "red", signals=signal, setups=setups,
+                       high=float(L["High"]), low=float(L["Low"]),
+                       in_progress=(f"current week so far: {strat_type(cur_w, L)} "
+                                    f"{'green' if cur_w['Close'] > cur_w['Open'] else 'red'}") if in_prog else "")
+    return out
+
+
+def ftfc(hist):
+    """Full timeframe continuity: last close vs the open of the current Q / M / W / D."""
+    h = hist.copy()
+    h.index = h.index.tz_localize(None) if h.index.tz is not None else h.index
+    last = h.index[-1]
+    c = h["Close"].iloc[-1]
+    res = {}
+    for tf, key in (("Q", last.to_period("Q")), ("M", last.to_period("M")), ("W", last.to_period("W-FRI"))):
+        per = h.index.to_period("Q" if tf == "Q" else "M" if tf == "M" else "W-FRI")
+        o = h["Open"][per == key].iloc[0]
+        res[tf] = "G" if c > o else "R"
+    res["D"] = "G" if c > h["Open"].iloc[-1] else "R"
+    s = "".join(res.values())
+    state = "Bullish FTFC" if s == "GGGG" else "Bearish FTFC" if s == "RRRR" else "Mixed"
+    return dict(tfs=res, state=state)
+
+
+def strat_entries(strat, side, t1, t2, atr, spot):
+    """Setups that agree with the plan side, with R:R measured trigger → strat stop → walls."""
+    rows = []
+    for tf, d in strat.items():
+        for s in d["setups"]:
+            if s["side"] != side:
+                continue
+            risk = abs(s["trigger"] - s["stop"])
+            if risk <= 0:
+                continue
+            reward1 = (t1 - s["trigger"]) if side == "LONG" else (s["trigger"] - t1)
+            reward2 = (t2 - s["trigger"]) if side == "LONG" else (s["trigger"] - t2)
+            dist = (s["trigger"] - spot) / atr if side == "LONG" else (spot - s["trigger"]) / atr
+            rows.append(dict(s, rr1=reward1 / risk, rr2=reward2 / risk, dist_atr=dist, risk=risk))
+    # best = highest timeframe whose trigger is within ~1.5 daily ATR and gives ≥3:1 to T1 or T2
+    ok = [r for r in rows if r["dist_atr"] <= 1.5 and max(r["rr1"], r["rr2"]) >= MIN_RR and r["rr1"] > 0]
+    best = max(ok, key=lambda r: (r["rr1"] >= MIN_RR, TF_RANK[r["tf"]], r["rr1"])) if ok else None
+    return sorted(rows, key=lambda r: -TF_RANK[r["tf"]]), best
+
+
+# ----------------------------------------------------------------------------
+# Trade plan
+# ----------------------------------------------------------------------------
+def build_plan(sym, px, ear, w, bias, follow, df, today, events, strat=None, tfc=None):
+    spot, atr = px["spot"], px["atr"]
+    reasons, score = [], 0.0
+
+    # 1. Earnings reaction (post-earnings = IV already crushed)
+    re = ear.get("reaction")
+    post = bool(re and 0 <= re["bars_since"] <= POST_EARNINGS_MAX_BARS)
+    if post:
+        if re["move"] > 0.02 and re["held"]:
+            score += 1.5; reasons.append(f"Gapped {re['gap']:+.1%} on earnings and is holding the upper half of the reaction day")
+        elif re["move"] < -0.02 and re["held"]:
+            score -= 1.5; reasons.append(f"Gapped {re['gap']:+.1%} on earnings and is holding the lower half of the reaction day")
+        elif abs(re["move"]) > 0.02:
+            reasons.append(f"Earnings move {re['move']:+.1%} is fading — reversal risk, wait for direction")
+        else:
+            reasons.append("Muted earnings reaction")
+
+    # 2. Weekly trend (your 21/72 EMA framework)
+    score += px["tscore"]
+    reasons.append(px["trend"])
+
+    # 3. Flow lean (+ next-day confirmation counts double)
+    if abs(bias) >= 0.3:
+        score += 1 if bias > 0 else -1
+        reasons.append(f"Unusual flow leans {'bullish' if bias > 0 else 'bearish'} ({bias:+.0%} of classified premium)")
+    conf = [f for f in follow if f["opened"] and f["sign"]]
+    if conf:
+        s = sum(f["sign"] for f in conf)
+        if s:
+            score += 1 if s > 0 else -1
+            reasons.append(f"Yesterday's flagged flow was confirmed as OPENING by today's OI ({len(conf)} contract(s))")
+
+    if tfc and tfc["state"] != "Mixed":
+        score += 0.5 if tfc["state"].startswith("Bull") else -0.5
+        reasons.append(f"{tfc['state']} (Q/M/W/D all {'green' if tfc['state'].startswith('Bull') else 'red'})")
+
+    direction = "LONG" if score >= 2 else "SHORT" if score <= -2 else "WATCH"
+
+    cw, pw = w.get("call_wall"), w.get("put_wall")
+    plan = dict(direction=direction, score=score, reasons=reasons, post_earnings=post)
+
+    def stop_long():
+        cands = []
+        if pw: cands.append(pw - 0.25 * atr)
+        if post and re["move"] > 0: cands.append(re["low"] - 0.1 * atr)
+        cands.append(px["swing_low"] - 0.1 * atr)
+        ok = [c for c in cands if c <= spot - 0.5 * atr]
+        return max(ok) if ok else spot - 1.5 * atr
+
+    def stop_short():
+        cands = []
+        if cw: cands.append(cw + 0.25 * atr)
+        if post and re["move"] < 0: cands.append(re["high"] + 0.1 * atr)
+        cands.append(px["swing_high"] + 0.1 * atr)
+        ok = [c for c in cands if c >= spot + 0.5 * atr]
+        return min(ok) if ok else spot + 1.5 * atr
+
+    d = direction if direction != "WATCH" else ("LONG" if score >= 0 else "SHORT")
+    if d == "LONG":
+        stop = stop_long()
+        t1 = cw if cw and cw > spot + 0.5 * atr else spot + 2 * atr
+        t2 = w.get("call_wall2") or (t1 + atr)
+        t2 = max(t2, t1 + 0.5 * atr)
+        lvl = max(spot, re["high"]) if post and re["move"] > 0 else spot
+        entry = lvl
+        risk = entry - stop
+        rr1, rr2 = (t1 - entry) / risk, (t2 - entry) / risk
+        entry_3r = (t1 + MIN_RR * stop) / (1 + MIN_RR)     # price where T1 gives 3:1
+        trig = (f"Break & hold above {fmt(lvl)} (reaction-day high)" if lvl > spot else f"Hold above {fmt(spot)} (last close)")
+    else:
+        stop = stop_short()
+        t1 = pw if pw and pw < spot - 0.5 * atr else spot - 2 * atr
+        t2 = w.get("put_wall2") or (t1 - atr)
+        t2 = min(t2, t1 - 0.5 * atr)
+        lvl = min(spot, re["low"]) if post and re["move"] < 0 else spot
+        entry = lvl
+        risk = stop - entry
+        rr1, rr2 = (entry - t1) / risk, (entry - t2) / risk
+        entry_3r = (t1 + MIN_RR * stop) / (1 + MIN_RR)
+        trig = (f"Break & hold below {fmt(lvl)} (reaction-day low)" if lvl < spot else f"Hold below {fmt(spot)} (last close)")
+
+    plan.update(side=d, entry=entry, stop=stop, t1=t1, t2=t2, rr1=rr1, rr2=rr2, trigger=trig)
+    if rr1 >= MIN_RR:
+        plan["entry_note"] = f"R:R {rr1:.1f}:1 to target 1 from the last close — valid at the trigger."
+    elif rr2 >= MIN_RR:
+        plan["entry_note"] = (f"Only {rr1:.1f}:1 to target 1 from the trigger, but {rr2:.1f}:1 to target 2. "
+                              f"Take partial at T1, trail the rest. Better: limit entry at {fmt(entry_3r)} for 3:1 on T1.")
+    else:
+        far = abs(entry_3r - spot) / atr
+        plan["entry_note"] = (f"R:R only {rr1:.1f}:1 from the trigger. Wait for a {'pullback' if d == 'LONG' else 'bounce'} to "
+                              f"{fmt(entry_3r)} ({far:.1f} ATR away) to get 3:1 — otherwise pass.")
+    plan["rr_ok"] = rr1 >= MIN_RR or rr2 >= MIN_RR
+    plan["option"] = option_idea(d, spot, stop, t1, t2, df, today, ear)
+    plan["strat_rows"], plan["strat_best"] = strat_entries(strat or {}, d, t1, t2, atr, spot)
+    ck = []
+    if tfc:
+        aligned = all(v == ("G" if d == "LONG" else "R") for k, v in tfc["tfs"].items() if k in ("M", "W"))
+        ck.append((aligned, f"Continuity: Month & Week {'green' if d == 'LONG' else 'red'} at entry "
+                            f"(now Q{tfc['tfs']['Q']} M{tfc['tfs']['M']} W{tfc['tfs']['W']} D{tfc['tfs']['D']}) (re-check at 10:00)"))
+    b = plan["strat_best"]
+    ck.append((b is not None, f"Strat trigger in force: {b['tf']} {b['name']} — enter only when price trades through "
+                              f"{fmt(b['trigger'])}; stop {fmt(b['stop'])}" if b else
+               "Strat trigger: none within reach that gives 3:1 — wait for a new inside bar / reversal on D–9D"))
+    ck.append((plan["rr_ok"] or b is not None, "Risk:reward ≥ 3:1 to T1 (or T2 with a partial at T1)"))
+    ck.append((any(f["opened"] and f["sign"] == (1 if d == "LONG" else -1) for f in follow),
+               "Flow confirmation: flagged flow on your side opened new positions (OI up). The 10:00 check confirms it"))
+    ck.append((None, "Don't chase: if price is more than ½ ATR past the trigger by 10:00, wait for a re-test or skip"))
+    plan["checklist"] = ck
+
+    # event warnings
+    warn = []
+    ne = ear.get("next_earn")
+    if ne and (ne - today).days <= 14:
+        warn.append(f"Earnings in {(ne - today).days} days ({ne}) — IV is inflating; buying premium now pays for that.")
+    for d0, t, e in events:
+        if 0 <= (d0 - today).days <= 14 and t in (sym, "*"):
+            warn.append(f"{d0}: {e}")
+    if ear.get("ex_div") and isinstance(ear["ex_div"], dt.date) and 0 <= (ear["ex_div"] - today).days <= 14:
+        warn.append(f"Ex-dividend {ear['ex_div']}")
+    plan["warnings"] = warn
+    plan["checklist"].insert(3, (not any("Earnings in" in x for x in warn),
+                                 "No earnings inside the next 14 days / before your option's expiry"))
+    return plan
+
+
+def option_idea(side, spot, stop, t1, t2, df, today, ear):
+    if df is None:
+        return None
+    cp = "C" if side == "LONG" else "P"
+    win = df[(df.cp == cp) & (df.dte >= PLAN_DTE_RANGE[0]) & (df.dte <= PLAN_DTE_RANGE[1])
+             & (df.bid > 0) & (df.ask > 0)]
+    if not len(win):
+        win = df[(df.cp == cp) & (df.bid > 0) & (df.ask > 0)]
+        if not len(win):
+            return None
+    ne = ear.get("next_earn")
+    # prefer an expiry BEFORE the next earnings (avoid paying the IV ramp)
+    exps = sorted(win["expiry"].unique(), key=lambda e: abs((dt.date.fromisoformat(e) - today).days - 35))
+    if ne:
+        pre = [e for e in exps if dt.date.fromisoformat(e) < ne]
+        exps = pre or exps
+    exp = exps[0]
+    ch = win[win.expiry == exp].copy()
+    dte = int(ch["dte"].iloc[0])
+    ch["adelta"] = ch["delta"].abs()
+    longk = ch.iloc[(ch["adelta"] - 0.60).abs().argsort()].iloc[0]
+    iv = float(longk["ivc"])
+    Th = max(dte - HOLD_DAYS_ASSUMED, 1) / 365
+    cost = float(longk["ask"])  # assume you pay the ask (conservative)
+    v_t1 = bs(t1, longk["strike"], Th, iv, cp)[0]
+    v_st = bs(stop, longk["strike"], Th, iv, cp)[0]
+    single = dict(kind=f"Buy {exp} {longk['strike']:g}{cp} (Δ≈{longk['delta']:+.2f})", cost=cost,
+                  at_t1=v_t1, at_stop=v_st, rr=(v_t1 - cost) / max(cost - v_st, 0.01), iv=iv, dte=dte)
+
+    # debit spread capped at the wall/target
+    shorts = ch[(ch["strike"] > longk["strike"]) if cp == "C" else (ch["strike"] < longk["strike"])]
+    spread = None
+    if len(shorts):
+        sk = shorts.iloc[(shorts["strike"] - t1).abs().argsort()].iloc[0]
+        debit = float(longk["ask"] - sk["bid"])
+        width = abs(sk["strike"] - longk["strike"])
+        if 0 < debit < width:
+            sv_t1 = bs(t1, longk["strike"], Th, iv, cp)[0] - bs(t1, sk["strike"], Th, float(sk["ivc"]), cp)[0]
+            sv_st = bs(stop, longk["strike"], Th, iv, cp)[0] - bs(stop, sk["strike"], Th, float(sk["ivc"]), cp)[0]
+            spread = dict(kind=f"{exp} {longk['strike']:g}/{sk['strike']:g}{cp} debit spread", cost=debit,
+                          at_t1=sv_t1, at_stop=sv_st, max_profit=width - debit,
+                          rr=(sv_t1 - debit) / max(debit - sv_st, 0.01), rr_max=(width - debit) / debit)
+    return dict(single=single, spread=spread)
+
+
+# ----------------------------------------------------------------------------
+# Main
+# ----------------------------------------------------------------------------
+def publish_housekeeping():
+    SITE_DIR.mkdir(parents=True, exist_ok=True)
+    (SITE_DIR / ".nojekyll").touch()            # tell GitHub Pages to serve files as-is
+    cutoff = dt.date.today() - dt.timedelta(days=KEEP_REPORT_DAYS)
+    for f in REPORT_DIR.glob("*_20*.*"):
+        try:
+            if dt.date.fromisoformat(f.stem.split("_")[-1]) < cutoff:
+                f.unlink()
+        except ValueError:
+            pass
+
+
+def scan_one(sym, today, events):
+    tk = yf.Ticker(sym)
+    hist = retry(tk.history, period="2y", interval="1d", auto_adjust=False)
+    if hist is None or len(hist) < 120:
+        raise RuntimeError("not enough price history")
+    px = price_context(hist)
+    ear = earnings_context(tk, hist, today)
+    df = load_chains(tk, px["spot"], today)
+    if df is None or not len(df):
+        raise RuntimeError("no listed options in range")
+    w = walls(df, px["spot"])
+    flow, bias, bull, bear = unusual_flow(df, today)
+    follow = oi_followup(sym, df)
+    atm = df[(df.cp == "C") & (df.dte >= 20)]
+    if len(atm):
+        a = atm.iloc[(atm["strike"] - px["spot"]).abs().argsort()].iloc[0]
+        iv_hv = f"{a['ivc']:.0%} vs {px['hv20']:.0%}" + (" (cheap)" if a["ivc"] < px["hv20"] * 1.1 else " (rich)" if a["ivc"] > px["hv20"] * 1.5 else "")
+    else:
+        iv_hv = "—"
+    strat = strat_scan(hist)
+    tfc = ftfc(hist)
+    plan = build_plan(sym, px, ear, w, bias, follow, df, today, events, strat, tfc)
+    save_snapshot(sym, today, flow)
+    return dict(sym=sym, px=px, ear=ear, walls=w, flow=flow, follow=follow, plan=plan, iv_hv=iv_hv,
+                strat=strat, tfc=tfc)
+
+
+def main():
+    today = dt.date.today()
+    REPORT_DIR.mkdir(exist_ok=True)
+    events = load_events()
+    universe = load_watchlist()
+    recent, upcoming = discover_earnings(today)
+    for s in recent:
+        if s not in universe:
+            universe.append(s)
+    upcoming = [u for u in upcoming if u[0] not in recent]
+    log(f"Scanning {len(universe)} tickers ({len(recent)} recent reporters added)")
+    results, errors = [], []
+    for i, sym in enumerate(universe, 1):
+        try:
+            log(f"[{i}/{len(universe)}] {sym}")
+            results.append(scan_one(sym, today, events))
+        except Exception as ex:
+            errors.append((sym, str(ex)[:120]))
+            log(f"  skipped {sym}: {ex}")
+    page = SR.render_plan(results, upcoming, today, errors, MIN_RR, STRAT_TFS)
+    publish_housekeeping()
+    (SITE_DIR / "index.html").write_text(page)
+    if not (SITE_DIR / "check.html").exists():
+        (SITE_DIR / "check.html").write_text(SR.placeholder_check(today))
+    (REPORT_DIR / f"plan_{today.isoformat()}.html").write_text(page)
+    keep = []
+    for r in results:
+        p = r["plan"]
+        keep.append(dict(sym=r["sym"], direction=p["direction"], side=p["side"], entry=p["entry"], stop=p["stop"],
+                         t1=p["t1"], t2=p["t2"], trigger=p["trigger"], atr=r["px"]["atr"], last=r["px"]["spot"],
+                         d_high=r["strat"].get("D", {}).get("high"), d_low=r["strat"].get("D", {}).get("low"),
+                         best=p.get("strat_best"), flow=r["flow"], post=p["post_earnings"]))
+    (REPORT_DIR / "plans_latest.json").write_text(json.dumps(dict(date=today.isoformat(), plans=keep), default=float))
+    with open(REPORT_DIR / f"plan_{today.isoformat()}.csv", "w", newline="") as f:
+        wr = csv.writer(f)
+        wr.writerow(["ticker", "direction", "post_earnings", "score", "last", "trigger", "stop", "t1", "t2", "rr_t1", "rr_t2",
+                     "put_wall", "call_wall", "next_earnings"])
+        for r in results:
+            p, w = r["plan"], r["walls"]
+            wr.writerow([r["sym"], p["direction"], p["post_earnings"], round(p["score"], 1), round(r["px"]["spot"], 2), p["trigger"],
+                         round(p["stop"], 2), round(p["t1"], 2), round(p["t2"], 2), round(p["rr1"], 2), round(p["rr2"], 2),
+                         w.get("put_wall"), w.get("call_wall"), r["ear"].get("next_earn")])
+    log(f"Done → {SITE_DIR / 'index.html'}  ({len(results)} plans, {len(errors)} skipped)")
+
+
+# ----------------------------------------------------------------------------
+# 10:00 am check: first 30 minutes vs last night's plans + overnight OI + early flow
+# ----------------------------------------------------------------------------
+def intraday(tk):
+    h = retry(tk.history, period="1d", interval="1m")
+    if h is None or not len(h):
+        return None
+    if h.index[-1].date() != dt.date.today():
+        return None
+    return h
+
+
+def classify_open(p, h):
+    """Status of last night's plan after the opening range."""
+    atr, side = p["atr"], p["side"]
+    b = p.get("best")
+    trig = b["trigger"] if b else p["entry"]
+    stop = b["stop"] if b else p["stop"]
+    t1 = p["t1"]
+    now = float(h["Close"].iloc[-1])
+    first = h[h.index <= h.index[0] + pd.Timedelta(minutes=29)]
+    orh, orl = float(first["High"].max()), float(first["Low"].min())
+    hi, lo = float(h["High"].max()), float(h["Low"].min())
+    gap = float(h["Open"].iloc[0]) / p["last"] - 1
+    if p.get("d_high") and hi > p["d_high"] and p.get("d_low") and lo < p["d_low"]:
+        candle = "3 so far"
+    elif p.get("d_high") and hi > p["d_high"]:
+        candle = "2U so far"
+    elif p.get("d_low") and lo < p["d_low"]:
+        candle = "2D so far"
+    else:
+        candle = "1 so far"
+    sg = 1 if side == "LONG" else -1
+    touched_trig = (hi >= trig) if sg > 0 else (lo <= trig)
+    hit_stop = (lo <= stop) if sg > 0 else (hi >= stop)
+    beyond = sg * (now - trig) / atr
+    risk_now = sg * (now - stop)
+    rr_now = sg * (t1 - now) / risk_now if risk_now > 0 else 0.0
+    orx = orh if sg > 0 else orl
+    if hit_stop and sg * (now - stop) <= 0:
+        state, txt = "Stopped", f"Traded through the stop at {fmt(stop)}. Plan is off for today."
+    elif sg * (now - t1) >= 0:
+        state, txt = "At target", f"Already at target 1 ({fmt(t1)}). Don't chase it."
+    elif touched_trig and beyond > 0.5:
+        state, txt = "Extended", (f"Triggered at {fmt(trig)} and ran {beyond:.1f} ATR past it. "
+                                  f"Wait for a pullback toward {fmt(trig)} or the opening-range {'high' if sg > 0 else 'low'} {fmt(orx)}.")
+    elif touched_trig and beyond >= 0:
+        state, txt = "Triggered", (f"Triggered at {fmt(trig)} and holding. Valid entry with the stop at {fmt(stop)}; "
+                                   f"a break of the opening-range {'high' if sg > 0 else 'low'} {fmt(orx)} adds confirmation.")
+    elif touched_trig:
+        state, txt = "Failed", (f"Traded {'above' if sg > 0 else 'below'} {fmt(trig)} then fell back "
+                                f"({'failed 2U' if sg > 0 else 'failed 2D'}). Skip unless it reclaims {fmt(trig)}.")
+    else:
+        state, txt = "Waiting", (f"Not triggered. Set an alert at {fmt(trig)}. Price is {abs(beyond):.1f} ATR away; "
+                                 f"the opening range is {fmt(orl)} to {fmt(orh)}.")
+    return dict(sym=p["sym"], dir=p["direction"], side=side, now=now, gap=gap, candle=candle, state=state, status=txt,
+                trig=trig, stop=stop, t1=t1, orh=orh, orl=orl, rr_now=rr_now)
+
+
+def check():
+    f = REPORT_DIR / "plans_latest.json"
+    if not f.exists():
+        log("No plans_latest.json yet — run the evening scan first."); return 1
+    data = json.loads(f.read_text())
+    today = dt.date.today()
+    futs = []
+    for sym, name in (("ES=F", "S&P futures"), ("NQ=F", "Nasdaq futures")):
+        try:
+            fi = yf.Ticker(sym).fast_info
+            futs.append((name, fi["lastPrice"] / fi["previousClose"] - 1))
+            time.sleep(SLEEP)
+        except Exception:
+            pass
+    rows, oi_rows, early, stale = [], [], {}, True
+    for p in data["plans"]:
+        tk = yf.Ticker(p["sym"])
+        try:
+            h = intraday(tk)
+        except Exception as ex:
+            log(f"  {p['sym']}: {ex}"); continue
+        if h is None:
+            continue
+        rows.append(classify_open(p, h))
+        # OI follow-up on last night's flagged contracts + early flow on the same expirations
+        flagged = p.get("flow") or []
+        exps = list(dict.fromkeys(x["expiry"] for x in flagged))[:2]
+        if p["direction"] != "WATCH" and not exps:
+            try:
+                exps = [e for e in retry(lambda: tk.options)
+                        if PLAN_DTE_RANGE[0] <= (dt.date.fromisoformat(e) - today).days <= PLAN_DTE_RANGE[1]][:1]
+            except Exception:
+                exps = []
+        now_oi, frames = {}, []
+        for ex in exps:
+            try:
+                ch = retry(tk.option_chain, ex)
+            except Exception:
+                continue
+            dte = (dt.date.fromisoformat(ex) - today).days
+            for side, d in (("C", ch.calls), ("P", ch.puts)):
+                now_oi.update(dict(zip(d["contractSymbol"], d["openInterest"].fillna(0))))
+                d = d.copy(); d["cp"], d["expiry"], d["dte"] = side, ex, dte
+                frames.append(d)
+        for x in flagged:
+            if x["contract"] in now_oi:
+                chg = int(now_oi[x["contract"]] - x["oi"])
+                stale = stale and chg == 0
+                ratio = chg / max(x["volume"], 1)
+                oi_rows.append(dict(sym=p["sym"], c=f"{x['expiry']} {x['strike']:g}{x['cp']}", label=x["label"], vol=x["volume"],
+                                    chg=chg, v="Opened, confirmed" if ratio >= 0.5 else "Closed, ignore" if chg < 0 else "Mixed"))
+        if frames:
+            df = pd.concat(frames, ignore_index=True)
+            for c in ("volume", "openInterest", "bid", "ask", "lastPrice"):
+                df[c] = pd.to_numeric(df.get(c), errors="coerce").fillna(0.0)
+            df["mid"] = np.where((df["bid"] > 0) & (df["ask"] > 0), (df["bid"] + df["ask"]) / 2, df["lastPrice"])
+            df["premium"] = df["volume"] * df["mid"] * 100
+            hot = df[(df["volume"] >= UNUSUAL_MIN_VOLUME) & (df["premium"] >= UNUSUAL_MIN_PREMIUM)].sort_values("premium", ascending=False).head(6)
+            ef = []
+            for _, r in hot.iterrows():
+                lean, _ = side_lean(r)
+                label, _ = MEANING.get((r["cp"], lean), ("Unclear side", 0))
+                ef.append(dict(expiry=r["expiry"], strike=float(r["strike"]), cp=r["cp"], volume=int(r["volume"]),
+                               oi=int(r["openInterest"]), premium=float(r["premium"]), label=label))
+            if ef:
+                early[p["sym"]] = ef
+    now_str = dt.datetime.now().strftime("%-I:%M %p").lower()
+    page = SR.render_check(rows, oi_rows, early, futs, stale and bool(oi_rows), data["date"], today, now_str)
+    publish_housekeeping()
+    (SITE_DIR / "check.html").write_text(page)
+    (REPORT_DIR / f"check_{today.isoformat()}.html").write_text(page)
+    log(f"Done → {SITE_DIR / 'check.html'}  ({len(rows)} checked)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(check() if ("--check" in sys.argv or "--morning" in sys.argv) else main())
