@@ -1,0 +1,1 @@
+{"date": "2026-11-18", "unusual": [{"contract": "LLY261127C01500000", "cp": "C", "strike": 1500.0, "expiry": "2026-11-27", "dte": 9, "volume": 382, "oi": 219, "vol_oi": 1.7442922374429224, "premium": 53289.0, "lean": "MID", "label": "Unclear side", "sign": 0, "pos": 0.5102040816326531, "bid": 1.15, "ask": 1.64, "last": 1.4}]}

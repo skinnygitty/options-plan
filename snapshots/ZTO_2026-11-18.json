@@ -1,0 +1,1 @@
+{"date": "2026-11-18", "unusual": [{"contract": "ZTO261218P00025000", "cp": "P", "strike": 25.0, "expiry": "2026-12-18", "dte": 30, "volume": 1503, "oi": 1002, "vol_oi": 1.5, "premium": 631260.0, "lean": "BOUGHT", "label": "Puts bought", "sign": -1, "pos": 1.3125, "bid": 3.4, "ask": 5.0, "last": 5.5}]}

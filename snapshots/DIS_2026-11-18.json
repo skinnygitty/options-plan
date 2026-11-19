@@ -1,0 +1,1 @@
+{"date": "2026-11-18", "unusual": [{"contract": "DIS261127C00125000", "cp": "C", "strike": 125.0, "expiry": "2026-11-27", "dte": 9, "volume": 888, "oi": 560, "vol_oi": 1.5857142857142856, "premium": 89688.0, "lean": "MID", "label": "Unclear side", "sign": 0, "pos": 0.5625000000000002, "bid": 0.85, "ask": 1.17, "last": 1.03}]}

@@ -1,0 +1,1 @@
+{"date": "2026-11-18", "unusual": [{"contract": "BIDU261204P00091000", "cp": "P", "strike": 91.0, "expiry": "2026-12-04", "dte": 16, "volume": 2200, "oi": 646, "vol_oi": 3.4055727554179565, "premium": 4845500.0, "lean": "SOLD", "label": "Puts sold", "sign": 1, "pos": -1.8830769230769229, "bid": 20.4, "ask": 23.65, "last": 14.28}]}

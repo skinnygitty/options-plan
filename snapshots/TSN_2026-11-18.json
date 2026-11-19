@@ -1,0 +1,1 @@
+{"date": "2026-11-18", "unusual": [{"contract": "TSN261218C00065000", "cp": "C", "strike": 65.0, "expiry": "2026-12-18", "dte": 30, "volume": 1351, "oi": 847, "vol_oi": 1.5950413223140496, "premium": 168875.0, "lean": "BOUGHT", "label": "Calls bought", "sign": 1, "pos": 1.166666666666667, "bid": 1.1, "ask": 1.4, "last": 1.45}]}

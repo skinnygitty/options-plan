@@ -1,0 +1,1 @@
+{"date": "2026-11-18", "unusual": [{"contract": "CSCO261218P00125000", "cp": "P", "strike": 125.0, "expiry": "2026-12-18", "dte": 30, "volume": 456, "oi": 301, "vol_oi": 1.5149501661129567, "premium": 1275660.0, "lean": "BOUGHT", "label": "Puts bought", "sign": -1, "pos": 0.9859154929577463, "bid": 26.2, "ask": 29.75, "last": 29.7}]}
