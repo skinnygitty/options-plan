@@ -1,0 +1,67 @@
+name: Options scanner
+
+on:
+  schedule:
+    # GitHub cron runs in UTC. Each job is listed twice (EDT and EST); ci_gate.py
+    # runs only the one that lands at the right New York time and skips the other.
+    - cron: "37 22 * * 1-5"   # 6:37 pm EDT  (evening scan, summer)
+    - cron: "37 23 * * 1-5"   # 6:37 pm EST  (evening scan, winter)
+    - cron: "3 14 * * 1-5"    # 10:03 am EDT (10:00 check, summer)
+    - cron: "3 15 * * 1-5"    # 10:03 am EST (10:00 check, winter)
+  workflow_dispatch:          # "Run workflow" button for a manual run
+    inputs:
+      mode:
+        description: Which scan to run
+        type: choice
+        options: [evening, check]
+        default: evening
+
+permissions:
+  contents: write
+
+concurrency:
+  group: options-scanner
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      TZ: America/New_York
+      SITE_DIR: docs
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Decide what to run
+        id: gate
+        run: python3 ci_gate.py "${{ github.event_name }}" "${{ inputs.mode }}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@v5
+        if: steps.gate.outputs.mode != 'skip'
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install packages
+        if: steps.gate.outputs.mode != 'skip'
+        run: pip install -r requirements.txt
+
+      - name: Evening scan
+        if: steps.gate.outputs.mode == 'evening'
+        run: python nightly_scanner.py
+
+      - name: 10:00 check
+        if: steps.gate.outputs.mode == 'check'
+        run: python nightly_scanner.py --check
+
+      - name: Publish to GitHub Pages
+        if: steps.gate.outputs.mode != 'skip'
+        run: |
+          git config user.name "options-scanner"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A docs reports snapshots
+          git diff --cached --quiet && { echo "Nothing new"; exit 0; }
+          git commit -m "${{ steps.gate.outputs.mode }} scan $(date '+%Y-%m-%d %H:%M')"
+          git pull --rebase --autostash
+          git push
