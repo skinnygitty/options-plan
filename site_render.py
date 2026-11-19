@@ -109,6 +109,23 @@ a.alert .pill{justify-self:start}
 a.alert .atext{font-size:14px;color:var(--muted)}
 @media (max-width:520px){a.alert{grid-template-columns:auto 1fr}a.alert .atext{grid-column:1 / -1}}
 .card{scroll-margin-top:70px}
+.tk-title{margin:14px 0 6px;font-weight:600;font-size:14px;color:var(--muted)}
+dl.ticket{display:grid;grid-template-columns:78px 1fr;gap:8px 12px;margin:0 0 6px;font-size:15px}
+dl.ticket dt{color:var(--muted);font-size:13.5px;padding-top:1px}
+dl.ticket dd{margin:0}
+dl.ticket b{font-weight:600}
+dl.ticket .opt{display:block;color:var(--muted);font-size:13px;margin-top:1px}
+.rank{margin-left:auto;display:inline-flex;align-items:baseline;gap:5px;padding:4px 10px;border-radius:10px;background:var(--bg)}
+.rank b{font:700 22px/1 var(--display);letter-spacing:-.02em}
+.rank i{font-style:normal;font-size:12px;font-weight:600;color:var(--muted)}
+.rank.t1{background:var(--long);color:#fff}.rank.t1 i{color:#fff;opacity:.85}
+.rank.t2{background:var(--long-soft);color:var(--long)}.rank.t2 i{color:var(--long)}
+.rank.t3{background:var(--signal-soft);color:var(--signal)}.rank.t3 i{color:var(--signal)}
+.rank.t5{background:var(--amber-soft);color:var(--amber)}.rank.t5 i{color:var(--amber)}
+.pill.HIV{background:#F6E6FF;color:#7A2E9C}
+@media (prefers-color-scheme:dark){.pill.HIV{background:#35213F;color:#D9A6F0}.rank.t1{color:#0E151C}.rank.t1 i{color:#0E151C}}
+details.hidden-list{margin-top:14px;color:var(--muted);font-size:14px}
+details.hidden-list summary{cursor:pointer}
 .empty{background:var(--surface);border:1px dashed var(--line);border-radius:var(--radius-card);padding:28px 18px;color:var(--muted)}
 @media (max-width:520px){.stats{grid-template-columns:repeat(2,1fr)}.sym{font-size:24px}.brand{display:none}
  header.top .wrap{justify-content:center}.card{padding:16px 14px 4px}}
@@ -236,6 +253,10 @@ def card_body(r, MIN_RR, STRAT_TFS):
     p, w, px, ear = r["plan"], r["walls"], r["px"], r["ear"]
     re_ = ear.get("reaction")
     o = ["<div class='body'>"]
+    if p.get("rank_parts"):
+        o.append(f"<h3>Rank {p['rank']} of 100</h3><div class='scroll'><table>"
+                 + "".join(f"<tr><td>{e(t)}</td><td>{'+' if v >= 0 else ''}{v:.0f}</td></tr>" for v, t in p["rank_parts"])
+                 + "</table></div>")
     o.append("<h3>Why</h3><ul>" + "".join(f"<li>{e(x)}</li>" for x in p["reasons"]) + "</ul>")
     if p["warnings"]:
         o.append("<ul>" + "".join(f"<li class='warn'>{e(x)}</li>" for x in p["warnings"]) + "</ul>")
@@ -357,13 +378,61 @@ def flow_alerts(results, BIG=1_000_000, SURGE=2.0):
         if top:
             bits.append(f"largest: {top['expiry'][5:]} {top['strike']:g}{top['cp']}, {money_short(top['premium'])}, {top['label'].lower()}")
         weight = max(bull, bear, unclear) * (cx or 1)
+        rk = r["plan"].get("rank", 0)
+        bits.append(f"trade rank {rk}" + (" (hidden)" if rk < 51 else ""))
         out.append(dict(sym=r["sym"], side=side, text="; ".join(bits) + ".", weight=weight))
     return sorted(out, key=lambda x: -x["weight"])
 
 
-def render_plan(results, upcoming, today, errors, MIN_RR, STRAT_TFS):
-    order = sorted(results, key=lambda r: (r["plan"]["direction"] == "WATCH", not r["plan"]["post_earnings"],
-                                           not r["plan"]["rr_ok"], -abs(r["plan"]["score"])))
+def ticket(r, entry, stop, rr1, rr2):
+    """The simple trade plan: contract, entry, stop, targets."""
+    p, sym = r["plan"], r["sym"]
+    long_ = p["side"] == "LONG"
+    o = (p.get("option") or {}).get("single")
+    est = lambda v: f"<span class='opt'>option ≈ {money_fmt(v)}</span>" if o and v is not None else ""
+    best = p.get("strat_best")
+    why = f"{best['tf']} {best['name']}" if best else p["trigger"]
+    title = ("Trade plan" if p["direction"] != "WATCH"
+             else f"Not ready yet. If it triggers {'long' if long_ else 'short'}:")
+    rows = [f"<p class='tk-title'>{e(title)}</p><dl class='ticket'>"]
+    if o:
+        ivr = o.get("iv_ratio")
+        ivtxt = f"IV {o['iv']:.0%}" + (f", {ivr:.1f}× the stock's 20-day realized" if ivr else "")
+        hi = " <span class='pill HIV'>High IV</span>" if o.get("high_iv") else ""
+        rows.append(f"<dt>Buy</dt><dd><b>{e(sym)} {e(o['label'])}</b>{hi}"
+                    f"<span class='opt'>about {money_fmt(o['mid'])} now (bid {money_fmt(o['bid'])}, ask {money_fmt(o['ask'])}), "
+                    f"{o['dte']} days, Δ {abs(o['delta']):.2f}</span>"
+                    f"<span class='opt'>Spread {money_fmt(o['spread'])} ({o['spread_pct']:.1%}), open interest {o['oi']:,}, "
+                    f"volume today {o['vol']:,}. {e(ivtxt)}.</span>"
+                    + ("<span class='opt warn'>High IV: the option is expensive and loses value if IV drops. "
+                       "Consider the debit spread in Full plan, which offsets most of it.</span>" if o.get("high_iv") else "")
+                    + "</dd>")
+    else:
+        rows.append("<dt>Buy</dt><dd>No liquid contract found; trade the stock or skip.</dd>")
+    rows.append(f"<dt>Enter</dt><dd>When {e(sym)} trades {'above' if long_ else 'below'} <b>{money_fmt(entry)}</b>"
+                f"<span class='opt'>{e(why)}</span>{est(o and o['at_entry'])}</dd>")
+    rows.append(f"<dt>Stop</dt><dd>Exit if {e(sym)} closes {'below' if long_ else 'above'} <b>{money_fmt(stop)}</b>{est(o and o['at_stop'])}</dd>")
+    rows.append(f"<dt>Target 1</dt><dd><b>{money_fmt(p['t1'])}</b>, sell half and move the stop to entry{est(o and o['at_t1'])}</dd>")
+    rows.append(f"<dt>Target 2</dt><dd><b>{money_fmt(p['t2'])}</b>, sell the rest{est(o and o['at_t2'])}</dd>")
+    rr_opt = f", about {o['rr_entry']:.1f} : 1 on the option" if o else ""
+    rows.append(f"<dt>R:R</dt><dd>{rr1:.1f} : 1 to T1 and {rr2:.1f} : 1 to T2 on the stock{rr_opt}"
+                f"<span class='opt'>Last close {money_fmt(r['px']['spot'])}. Option prices are estimates with IV unchanged.</span></dd>")
+    if max(rr1, rr2) < 3 or rr1 <= 0:
+        rows.append(f"<dt></dt><dd class='warn'>Under 3 : 1, so pass for now. {e(p.get('entry_note', ''))}</dd>")
+    rows.append("</dl>")
+    return "".join(rows)
+
+
+def tier(rank):
+    return ("Top", "t1") if rank >= 90 else ("Strong", "t2") if rank >= 80 else ("Good", "t3") if rank >= 70 \
+        else ("Fair", "t4") if rank >= 60 else ("Marginal", "t5")
+
+
+def render_plan(results, upcoming, today, errors, MIN_RR, STRAT_TFS, SHOW_MIN=51):
+    all_results = results
+    hidden = [r for r in results if r["plan"].get("rank", 0) < SHOW_MIN]
+    results = [r for r in results if r["plan"].get("rank", 0) >= SHOW_MIN]
+    order = sorted(results, key=lambda r: -r["plan"].get("rank", 0))
     nL = sum(r["plan"]["direction"] == "LONG" for r in results)
     nS = sum(r["plan"]["direction"] == "SHORT" for r in results)
     nW = len(results) - nL - nS
@@ -377,9 +446,9 @@ def render_plan(results, upcoming, today, errors, MIN_RR, STRAT_TFS):
         head = f"Nothing clean for {sess.strftime('%A')}"
     b = [f"<section class='hero'><p class='when'>Plan for {nice_day(sess)}, from the {today.strftime('%b')} {today.day} close</p>"
          f"<h1>{e(head[0].upper() + head[1:])}</h1>"
-         f"<p class='sub'>{plural(nW, 'more name')} on watch, {nP} just past earnings. Levels are on the line; tap a ticker for the full plan.</p></section>"]
-    alerts = flow_alerts(results)
-    quoted = [r["flowx"]["quoted"] for r in results if r.get("flowx") and r["flowx"].get("quoted") is not None]
+         f"<p class='sub'>Ranked 0 to 100, best first. {len(hidden)} more ranked 50 or below and are hidden. {nP} shown just past earnings.</p></section>"]
+    alerts = flow_alerts(all_results)
+    quoted = [r["flowx"]["quoted"] for r in all_results if r.get("flowx") and r["flowx"].get("quoted") is not None]
     if alerts:
         b.append("<section class='alerts'><h2>Flow alerts</h2><p class='muted'>Heavy one-sided premium or a jump versus the "
                  "ticker's normal, whether or not the full setup is ready yet.</p>")
@@ -399,7 +468,8 @@ def render_plan(results, upcoming, today, errors, MIN_RR, STRAT_TFS):
              f"<button data-f='WATCH' aria-pressed='false'>Watch<span class='n'>{nW}</span></button></div>")
     b.append("<div class='list'>")
     if not results:
-        b.append("<div class='empty'>No tickers scanned. Check watchlist.txt and reports/scanner.log.</div>")
+        b.append("<div class='empty'>No trade ranked above 50 tonight. That usually means setups are unclear or the contracts "
+                 "aren't liquid enough. The hidden list below shows what came closest.</div>")
     for r in order:
         p = r["plan"]
         lad, entry, stop = plan_ladder(r)
@@ -407,22 +477,19 @@ def render_plan(results, upcoming, today, errors, MIN_RR, STRAT_TFS):
         rr1 = best["rr1"] if best else p["rr1"]
         rr2 = best["rr2"] if best else p["rr2"]
         ok = max(rr1, rr2) >= MIN_RR and rr1 > 0
-        verb = "above" if p["side"] == "LONG" else "below"
-        how = (f"{best['tf']} {best['name']}" if best else p["trigger"])
-        lean = "" if p["direction"] != "WATCH" else f" <span class='muted'>(watch; leaning {p['side'].lower()})</span>"
         b.append(f"<article class='card' id='t-{e(r['sym'])}' data-dir='{p['direction']}' data-post='{1 if p['post_earnings'] else 0}'>"
                  f"<div class='head'><span class='sym'>{e(r['sym'])}</span><span class='pill {p['direction']}'>{p['direction'].title()}</span>"
                  + ("<span class='pill POST'>Post-earnings</span>" if p["post_earnings"] else "")
-                 + f"<span class='rr {'ok' if ok else 'no'}'>R:R {rr1:.1f} : 1</span></div>"
-                 f"<p class='enter'>Enter on a trade {verb} <b>{money_fmt(entry)}</b>, stop {money_fmt(stop)}. "
-                 f"<span class='muted'>{e(how)}</span>{lean}</p>"
-                 f"{lad}"
-                 f"<div class='stats'><div class='stat'><span>Last</span><b>{money_fmt(r['px']['spot'])}</b></div>"
-                 f"<div class='stat'><span>Target 1</span><b>{money_fmt(p['t1'])}</b></div>"
-                 f"<div class='stat'><span>Target 2</span><b>{money_fmt(p['t2'])}</b></div>"
-                 f"<div class='stat'><span>R:R to T2</span><b>{rr2:.1f} : 1</b></div></div>"
+                 + (f"<span class='pill HIV'>{e(r['iv']['level'])}</span>" if (r.get('iv') or {}).get('level') else "")
+                 + f"<span class='rank {tier(p['rank'])[1]}' title='Trade rank out of 100'><b>{p['rank']}</b><i>{tier(p['rank'])[0]}</i></span></div>"
+                 + ticket(r, entry, stop, rr1, rr2)
+                 + f"{lad}"
                  f"<details class='more'><summary>Full plan</summary>{card_body(r, MIN_RR, STRAT_TFS)}</details></article>")
     b.append("</div>")
+    if hidden:
+        b.append(f"<details class='hidden-list'><summary>{len(hidden)} hidden (ranked 50 or below)</summary><p class='muted'>"
+                 + ", ".join(f"{e(r['sym'])} {r['plan'].get('rank', 0)}" for r in sorted(hidden, key=lambda r: -r['plan'].get('rank', 0)))
+                 + "</p></details>")
 
     if upcoming:
         b.append("<section class='block'><h2>Reporting soon</h2><p>Implied volatility is high going into these. "
@@ -480,15 +547,18 @@ def render_check(rows, oi_rows, early, futs, stale, plan_date, today, now_str):
     if not rows:
         b.append("<div class='empty'>The morning check hasn't run yet today. It reads last night's plan and runs at 9:50 am on weekdays.</div>")
     order = ["Triggered", "Extended", "Waiting", "At target", "Failed", "Stopped"]
-    for r in sorted(rows, key=lambda r: (r["dir"] == "WATCH", order.index(r["state"]))):
+    for r in sorted(rows, key=lambda r: (order.index(r["state"]), -(r.get("rank") or 0))):
         lv = [("Stop", r["stop"], "stop"), ("Entry", r["trig"], "entry"), ("T1", r["t1"], "t"), ("Now", r["now"], "now")]
         bands = [(r["orl"], r["orh"], "orng"), (r["stop"], r["trig"], "risk"), (r["trig"], r["t1"], "reward")]
         lad = ladder(lv, bands)
         b.append(f"<article class='card' data-dir='{r['state']}'>"
                  f"<div class='head'><span class='sym'>{e(r['sym'])}</span><span class='pill {STATUS_PILL[r['state']]}'>{r['state']}</span>"
                  f"<span class='pill {r['dir']}'>{r['dir'].title()}</span>"
-                 f"<span class='rr {'ok' if r['rr_now'] >= 3 else 'no'}'>R:R {r['rr_now']:.1f} : 1 now</span></div>"
-                 f"<p class='enter'>{e(r['status'])}</p>{lad}"
+                 + (f"<span class='rank {tier(r['rank'])[1]}'><b>{r['rank']}</b><i>{tier(r['rank'])[0]}</i></span>" if r.get("rank") else "")
+                 + f"<span class='rr {'ok' if r['rr_now'] >= 3 else 'no'}' style='margin-left:8px'>R:R {r['rr_now']:.1f} : 1 now</span></div>"
+                 f"<p class='enter'>{e(r['status'])}</p>"
+                 + (f"<p class='muted' style='margin:4px 0 0'>Contract: {e(r['sym'])} {e(r['contract'])}</p>" if r.get("contract") else "")
+                 + f"{lad}"
                  f"<div class='stats'><div class='stat'><span>Now</span><b>{money_fmt(r['now'])}</b></div>"
                  f"<div class='stat'><span>Open gap</span><b>{r['gap']:+.2%}</b></div>"
                  f"<div class='stat'><span>Opening range</span><b>{money_fmt(r['orl'], 2)}–{money_fmt(r['orh'], 2)}</b></div>"

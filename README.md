@@ -39,6 +39,24 @@ Your Mac doesn't need to be on.
   scheduled slot an hour later. If a run fails, it shows red in the Actions tab and the site keeps the previous
   plan. If this keeps happening, see "Run on the Mac instead" below.
 
+## Trade rank (0 to 100)
+Every plan gets a rank; 50 or below is hidden (listed by name only at the bottom of the page).
+| Part | Points |
+|---|---|
+| Direction conviction (earnings reaction, weekly trend, flow, continuity) | 25 |
+| Risk/reward to target 1 (4:1 = 20, 3:1 = 15) | 20 |
+| Strat trigger in reach + month and week continuity | 15 |
+| Options flow on your side (lean, OI confirmed, premium surge) | 15 |
+| Contract liquidity (spread ≤4% of price = 15, ≤10% = 8) | 15 |
+| Option pricing (IV vs the stock's 20-day realized volatility) | 10 |
+Earnings within 14 days: −15. Watch names cap at 60. No contract with a spread ≤10% and open interest ≥500: capped
+at 40 (hidden). Can't reach 3:1: capped at 50 (hidden). Tiers: 90+ Top, 80s Strong, 70s Good, 60s Fair, 51–59 Marginal.
+
+**Contracts:** chosen from 21–60 days out, delta 0.45–0.75, spread ≤10% of the mid price, open interest ≥500,
+closest to 0.60 delta and ~35 days. **High IV** is flagged when IV is ≥1.4× the stock's 20-day realized volatility,
+or (after ~10 nights of history) in the top 20% of its own recent range.
+Thresholds are at the top of `nightly_scanner.py` (`MAX_SPREAD_PCT`, `MIN_CONTRACT_OI`, `HIGH_IV_X`, `SHOW_MIN_RANK`).
+
 ## How unusual flow is caught
 A contract is flagged if any of these is true:
 - volume is at least 1.25× its open interest with $50K+ premium (new positions likely), or

@@ -69,6 +69,10 @@ TOP_PREMIUM_MIN = 250_000         # ...and each ticker's top 3 contracts by prem
 SURGE_X = 2.0                     # call or put premium this many times its 10-day average = a surge
 
 MIN_RR, IDEAL_RR = 3.0, 4.0
+MAX_SPREAD_PCT = 0.10             # contract bid/ask spread must be ≤ 10% of its mid price
+MIN_CONTRACT_OI = 500             # ...and have at least this much open interest
+HIGH_IV_X = 1.4                   # IV ≥ 1.4× the stock's 20-day realized volatility = high IV
+SHOW_MIN_RANK = 51                # trades ranked 50 or below are hidden
 RISK_FREE = 0.04
 SLEEP = 0.35                      # seconds between Yahoo requests (be polite / avoid throttling)
 
@@ -442,7 +446,7 @@ def save_snapshot(sym, today, flow_rows, totals=None):
     SNAP_DIR.mkdir(exist_ok=True)
     (SNAP_DIR / f"{sym}_{today.isoformat()}.json").write_text(
         json.dumps(dict(date=today.isoformat(), unusual=flow_rows, totals=totals), default=float))
-    old = sorted(SNAP_DIR.glob(f"{sym}_*.json"))[:-10]   # keep 10 nights
+    old = sorted(SNAP_DIR.glob(f"{sym}_*.json"))[:-30]   # keep 30 nights (IV rank, premium averages)
     for f in old:
         f.unlink(missing_ok=True)
 
@@ -599,7 +603,7 @@ def strat_entries(strat, side, t1, t2, atr, spot):
             dist = (s["trigger"] - spot) / atr if side == "LONG" else (spot - s["trigger"]) / atr
             rows.append(dict(s, rr1=reward1 / risk, rr2=reward2 / risk, dist_atr=dist, risk=risk))
     # best = highest timeframe whose trigger is within ~1.5 daily ATR and gives ≥3:1 to T1 or T2
-    ok = [r for r in rows if r["dist_atr"] <= 1.5 and max(r["rr1"], r["rr2"]) >= MIN_RR and r["rr1"] > 0]
+    ok = [r for r in rows if -0.25 <= r["dist_atr"] <= 1.5 and max(r["rr1"], r["rr2"]) >= MIN_RR and r["rr1"] > 0]
     best = max(ok, key=lambda r: (r["rr1"] >= MIN_RR, TF_RANK[r["tf"]], r["rr1"])) if ok else None
     return sorted(rows, key=lambda r: -TF_RANK[r["tf"]]), best
 
@@ -704,8 +708,11 @@ def build_plan(sym, px, ear, w, bias, follow, df, today, events, strat=None, tfc
         plan["entry_note"] = (f"R:R only {rr1:.1f}:1 from the trigger. Wait for a {'pullback' if d == 'LONG' else 'bounce'} to "
                               f"{fmt(entry_3r)} ({far:.1f} ATR away) to get 3:1 — otherwise pass.")
     plan["rr_ok"] = rr1 >= MIN_RR or rr2 >= MIN_RR
-    plan["option"] = option_idea(d, spot, stop, t1, t2, df, today, ear)
     plan["strat_rows"], plan["strat_best"] = strat_entries(strat or {}, d, t1, t2, atr, spot)
+    _b = plan["strat_best"]
+    plan["use_entry"] = _b["trigger"] if _b else plan["entry"]
+    plan["use_stop"] = _b["stop"] if _b else plan["stop"]
+    plan["option"] = option_idea(d, plan["use_entry"], plan["use_stop"], t1, t2, df, today, ear)
     ck = []
     if tfc:
         aligned = all(v == ("G" if d == "LONG" else "R") for k, v in tfc["tfs"].items() if k in ("M", "W"))
@@ -737,7 +744,63 @@ def build_plan(sym, px, ear, w, bias, follow, df, today, events, strat=None, tfc
     return plan
 
 
-def option_idea(side, spot, stop, t1, t2, df, today, ear):
+def rank_plan(plan, px, flowx, follow, tfc, iv_info):
+    """0–100 trade quality. Returns (rank, list of (points, reason))."""
+    pts = []
+    d = plan["side"]
+    sg = 1 if d == "LONG" else -1
+    # 1. Conviction (25): earnings reaction, weekly trend, flow, continuity combined
+    conv = min(abs(plan["score"]) / 4.0, 1.0) * 25 if plan["score"] * sg > 0 else 0
+    pts.append((conv, "Direction conviction"))
+    # 2. Risk/reward (20)
+    b = plan.get("strat_best")
+    rr1 = b["rr1"] if b else plan["rr1"]
+    rr = 20 if rr1 >= 4 else 15 if rr1 >= 3 else 8 if rr1 >= 2 else 3 if rr1 >= 1.5 else 0
+    pts.append((rr, f"R:R {rr1:.1f} : 1 to T1"))
+    # 3. Strat trigger + continuity (15)
+    st = 10 if b else 0
+    if tfc and all(v == ("G" if sg > 0 else "R") for k, v in tfc["tfs"].items() if k in ("M", "W")):
+        st += 5
+    pts.append((st, "Strat trigger and month/week continuity"))
+    # 4. Flow on your side (15)
+    fl = 0
+    bias = (flowx or {}).get("bias", 0)
+    if bias * sg >= 0.3:
+        fl += 8
+    if any(f["opened"] and f["sign"] == sg for f in follow):
+        fl += 4
+    x = (flowx or {}).get("call_x" if sg > 0 else "put_x")
+    if x and x >= SURGE_X and bias * sg > 0:
+        fl += 3
+    pts.append((fl, "Options flow on your side"))
+    # 5. Contract liquidity (15)
+    o = (plan.get("option") or {}).get("single")
+    if o:
+        sp = o["spread_pct"]
+        lq = 15 if sp <= 0.04 else 12 if sp <= 0.07 else 8 if sp <= MAX_SPREAD_PCT else 0
+        if o["oi"] < MIN_CONTRACT_OI:
+            lq = min(lq, 4)
+        pts.append((lq, f"Contract spread {sp:.0%}, OI {o['oi']:,}"))
+    else:
+        pts.append((0, "No tradable contract"))
+    # 6. Option pricing (10): cheaper IV vs realized is better
+    ratio = (iv_info or {}).get("ratio")
+    ivp = 10 if ratio is None else 10 if ratio <= 1.1 else 7 if ratio <= 1.25 else 4 if ratio <= HIGH_IV_X else 0
+    pts.append((ivp, "Implied vs realized volatility"))
+    rank = sum(p for p, _ in pts)
+    # penalties and caps
+    if any("Earnings in" in w for w in plan.get("warnings", [])):
+        rank -= 15; pts.append((-15, "Earnings within 14 days"))
+    if plan["direction"] == "WATCH":
+        rank = min(rank, 60)
+    if not o or not o.get("liquid"):
+        rank = min(rank, 40)        # no liquid, tight-spread contract → hidden
+    if max(rr1, (b or plan)["rr2"]) < MIN_RR:
+        rank = min(rank, 50)        # can't reach 3:1 → hidden
+    return int(round(max(0, min(100, rank)))), pts
+
+
+def option_idea(side, entry, stop, t1, t2, df, today, ear):
     if df is None:
         return None
     cp = "C" if side == "LONG" else "P"
@@ -753,18 +816,36 @@ def option_idea(side, spot, stop, t1, t2, df, today, ear):
     if ne:
         pre = [e for e in exps if dt.date.fromisoformat(e) < ne]
         exps = pre or exps
-    exp = exps[0]
+    cand = win[win.expiry.isin(exps)].copy()
+    cand["adelta"] = cand["delta"].abs()
+    cand["spread_pct"] = (cand["ask"] - cand["bid"]) / ((cand["ask"] + cand["bid"]) / 2)
+    cand["liquid"] = (cand["spread_pct"] <= MAX_SPREAD_PCT) & (cand["openInterest"] >= MIN_CONTRACT_OI) \
+        & cand["adelta"].between(0.45, 0.75)
+    # closest to 0.60 delta and ~35 days, with a tight spread; liquid contracts first
+    cand["fit"] = (cand["adelta"] - 0.60).abs() * 2 + cand["spread_pct"] * 3 + (cand["dte"] - 35).abs() / 60
+    pool = cand[cand["liquid"]] if cand["liquid"].any() else cand
+    longk = pool.sort_values("fit").iloc[0]
+    exp = longk["expiry"]
     ch = win[win.expiry == exp].copy()
-    dte = int(ch["dte"].iloc[0])
-    ch["adelta"] = ch["delta"].abs()
-    longk = ch.iloc[(ch["adelta"] - 0.60).abs().argsort()].iloc[0]
+    dte = int(longk["dte"])
     iv = float(longk["ivc"])
     Th = max(dte - HOLD_DAYS_ASSUMED, 1) / 365
     cost = float(longk["ask"])  # assume you pay the ask (conservative)
-    v_t1 = bs(t1, longk["strike"], Th, iv, cp)[0]
-    v_st = bs(stop, longk["strike"], Th, iv, cp)[0]
-    single = dict(kind=f"Buy {exp} {longk['strike']:g}{cp} (Δ≈{longk['delta']:+.2f})", cost=cost,
-                  at_t1=v_t1, at_stop=v_st, rr=(v_t1 - cost) / max(cost - v_st, 0.01), iv=iv, dte=dte)
+    K = float(longk["strike"])
+    v_t1 = bs(t1, K, Th, iv, cp)[0]
+    v_t2 = bs(t2, K, Th, iv, cp)[0]
+    v_st = bs(stop, K, Th, iv, cp)[0]
+    # what the contract should cost when the stock reaches the entry trigger (~1 day out)
+    v_en = max(bs(entry, K, max(dte - 1, 1) / 365, iv, cp)[0], 0.01)
+    ed = dt.date.fromisoformat(exp)
+    label = f"{ed.strftime('%b')} {ed.day} ${K:g} {'call' if cp == 'C' else 'put'}"
+    single = dict(kind=f"Buy {exp} {K:g}{cp} (Δ≈{longk['delta']:+.2f})", label=label, delta=float(longk["delta"]),
+                  bid=float(longk["bid"]), ask=cost, mid=(float(longk["bid"]) + cost) / 2, cost=cost,
+                  at_entry=v_en, at_t1=v_t1, at_t2=v_t2, at_stop=v_st,
+                  rr=(v_t1 - cost) / max(cost - v_st, 0.01),
+                  rr_entry=(v_t1 - v_en) / max(v_en - v_st, 0.01), iv=iv, dte=dte, expiry=exp,
+                  spread=cost - float(longk["bid"]), spread_pct=float(longk["spread_pct"]),
+                  oi=int(longk["openInterest"]), vol=int(longk["volume"]), liquid=bool(longk["liquid"]))
 
     # debit spread capped at the wall/target
     shorts = ch[(ch["strike"] > longk["strike"]) if cp == "C" else (ch["strike"] < longk["strike"])]
@@ -814,16 +895,43 @@ def scan_one(sym, today, events):
     flowx = premium_surge(sym, totals)
     flowx.update(bias=bias, bull=bull, bear=bear)
     atm = df[(df.cp == "C") & (df.dte >= 20)]
+    iv_info = dict(atm_iv=None, hv=px["hv20"], ratio=None, level="", iv_rank=None)
     if len(atm):
         a = atm.iloc[(atm["strike"] - px["spot"]).abs().argsort()].iloc[0]
+        iv_info["atm_iv"] = float(a["ivc"])
+        iv_info["ratio"] = float(a["ivc"]) / px["hv20"] if px["hv20"] else None
         iv_hv = f"{a['ivc']:.0%} vs {px['hv20']:.0%}" + (" (cheap)" if a["ivc"] < px["hv20"] * 1.1 else " (rich)" if a["ivc"] > px["hv20"] * 1.5 else "")
     else:
         iv_hv = "—"
+    # IV rank vs this ticker's own stored history (needs ~10 nights)
+    past = []
+    for f in sorted(SNAP_DIR.glob(f"{sym}_*.json")):
+        try:
+            t = json.loads(f.read_text()).get("totals") or {}
+            if t.get("atm_iv"):
+                past.append(t["atm_iv"])
+        except Exception:
+            pass
+    if iv_info["atm_iv"] and len(past) >= 10:
+        lo, hi = min(past + [iv_info["atm_iv"]]), max(past + [iv_info["atm_iv"]])
+        iv_info["iv_rank"] = (iv_info["atm_iv"] - lo) / (hi - lo) * 100 if hi > lo else 50.0
+    r_ = iv_info["ratio"]
+    if (r_ and r_ >= HIGH_IV_X) or (iv_info["iv_rank"] is not None and iv_info["iv_rank"] >= 80):
+        iv_info["level"] = "High IV"
+    elif r_ and r_ >= 1.2:
+        iv_info["level"] = "Elevated IV"
+    totals["atm_iv"] = iv_info["atm_iv"]
     strat = strat_scan(hist)
     tfc = ftfc(hist)
     plan = build_plan(sym, px, ear, w, bias, follow, df, today, events, strat, tfc, flowx)
+    o = (plan.get("option") or {}).get("single")
+    if o:
+        o["iv_ratio"] = o["iv"] / px["hv20"] if px["hv20"] else None
+        o["high_iv"] = bool(o["iv_ratio"] and o["iv_ratio"] >= HIGH_IV_X)
+    plan["iv"] = iv_info
+    plan["rank"], plan["rank_parts"] = rank_plan(plan, px, flowx, follow, tfc, iv_info)
     save_snapshot(sym, today, flow, totals)
-    return dict(sym=sym, px=px, ear=ear, walls=w, flow=flow, follow=follow, plan=plan, iv_hv=iv_hv,
+    return dict(sym=sym, px=px, ear=ear, walls=w, flow=flow, follow=follow, plan=plan, iv_hv=iv_hv, iv=iv_info,
                 strat=strat, tfc=tfc, flowx=flowx)
 
 
@@ -846,7 +954,7 @@ def main():
         except Exception as ex:
             errors.append((sym, str(ex)[:120]))
             log(f"  skipped {sym}: {ex}")
-    page = SR.render_plan(results, upcoming, today, errors, MIN_RR, STRAT_TFS)
+    page = SR.render_plan(results, upcoming, today, errors, MIN_RR, STRAT_TFS, SHOW_MIN_RANK)
     publish_housekeeping()
     (SITE_DIR / "index.html").write_text(page)
     if not (SITE_DIR / "check.html").exists():
@@ -855,18 +963,21 @@ def main():
     keep = []
     for r in results:
         p = r["plan"]
-        keep.append(dict(sym=r["sym"], direction=p["direction"], side=p["side"], entry=p["entry"], stop=p["stop"],
+        if p.get("rank", 0) < SHOW_MIN_RANK:
+            continue
+        keep.append(dict(rank=p.get("rank"), sym=r["sym"], direction=p["direction"], side=p["side"], entry=p["entry"], stop=p["stop"],
                          t1=p["t1"], t2=p["t2"], trigger=p["trigger"], atr=r["px"]["atr"], last=r["px"]["spot"],
                          d_high=r["strat"].get("D", {}).get("high"), d_low=r["strat"].get("D", {}).get("low"),
-                         best=p.get("strat_best"), flow=r["flow"], post=p["post_earnings"]))
+                         best=p.get("strat_best"), flow=r["flow"], post=p["post_earnings"],
+                         contract=((p.get("option") or {}).get("single") or {}).get("label")))
     (REPORT_DIR / "plans_latest.json").write_text(json.dumps(dict(date=today.isoformat(), plans=keep), default=float))
     with open(REPORT_DIR / f"plan_{today.isoformat()}.csv", "w", newline="") as f:
         wr = csv.writer(f)
-        wr.writerow(["ticker", "direction", "post_earnings", "score", "last", "trigger", "stop", "t1", "t2", "rr_t1", "rr_t2",
+        wr.writerow(["ticker", "rank", "direction", "post_earnings", "score", "last", "trigger", "stop", "t1", "t2", "rr_t1", "rr_t2",
                      "put_wall", "call_wall", "next_earnings"])
         for r in results:
             p, w = r["plan"], r["walls"]
-            wr.writerow([r["sym"], p["direction"], p["post_earnings"], round(p["score"], 1), round(r["px"]["spot"], 2), p["trigger"],
+            wr.writerow([r["sym"], p.get("rank"), p["direction"], p["post_earnings"], round(p["score"], 1), round(r["px"]["spot"], 2), p["trigger"],
                          round(p["stop"], 2), round(p["t1"], 2), round(p["t2"], 2), round(p["rr1"], 2), round(p["rr2"], 2),
                          w.get("put_wall"), w.get("call_wall"), r["ear"].get("next_earn")])
     log(f"Done → {SITE_DIR / 'index.html'}  ({len(results)} plans, {len(errors)} skipped)")
@@ -928,6 +1039,7 @@ def classify_open(p, h):
         state, txt = "Waiting", (f"Not triggered. Set an alert at {fmt(trig)}. Price is {abs(beyond):.1f} ATR away; "
                                  f"the opening range is {fmt(orl)} to {fmt(orh)}.")
     return dict(sym=p["sym"], dir=p["direction"], side=side, now=now, gap=gap, candle=candle, state=state, status=txt,
+                contract=p.get("contract"), rank=p.get("rank"),
                 trig=trig, stop=stop, t1=t1, orh=orh, orl=orl, rr_now=rr_now)
 
 
