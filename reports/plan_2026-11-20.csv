@@ -1,0 +1,56 @@
+ticker,rank,direction,post_earnings,score,last,trigger,stop,t1,t2,rr_t1,rr_t2,put_wall,call_wall,next_earnings
+SPY,35,WATCH,False,0.0,710.12,Hold above $710.12 (last close),688.49,725.0,750.0,0.69,1.84,710.0,725.0,
+QQQ,60,WATCH,False,1.0,631.34,Hold above $631.34 (last close),602.28,700.0,720.0,2.36,3.05,630.0,700.0,
+IWM,76,SHORT,False,-2.0,262.64,Hold below $262.64 (last close),271.46,250.97,248.06,1.32,1.65,262.0,270.0,
+ANET,50,LONG,False,3.0,173.22,Hold above $173.22 (last close),151.99,201.52,208.6,1.33,1.67,170.0,175.0,2027-02-09
+LLY,38,LONG,False,2.0,1362.74,"Hold above $1,362.74 (last close)",1337.2,1400.0,1421.32,1.46,2.29,1360.0,1400.0,2027-02-03
+NVDA,48,SHORT,True,-2.5,138.3,Hold below $138.30 (last close),160.89,114.59,108.66,1.05,1.31,135.0,160.0,2027-02-24
+MU,6,WATCH,False,0.5,627.66,Hold above $627.66 (last close),529.47,700.0,750.0,0.74,1.25,620.0,700.0,2026-12-17
+GOOGL,41,WATCH,False,-0.5,278.7,Hold below $278.70 (last close),302.7,257.06,251.65,0.9,1.13,275.0,300.0,2027-02-03
+AMD,28,WATCH,False,0.5,451.26,Hold above $451.26 (last close),375.81,500.0,530.0,0.65,1.04,450.0,500.0,2027-02-02
+AAPL,50,WATCH,False,1.0,348.58,Hold above $348.58 (last close),343.9,366.18,370.57,3.76,4.7,345.0,350.0,2027-01-28
+AVGO,44,WATCH,False,-1.0,320.29,Hold below $320.29 (last close),345.5,276.32,265.33,1.74,2.18,320.0,340.0,2026-12-09
+MSFT,58,LONG,False,2.0,496.77,Hold above $496.77 (last close),485.51,532.71,541.69,3.19,3.99,490.0,500.0,2027-01-27
+TSLA,33,WATCH,False,-1.0,361.49,Hold below $361.49 (last close),404.54,325.17,316.09,0.84,1.05,360.0,400.0,2027-01-27
+NBIS,50,SHORT,True,-3.0,88.66,Hold below $88.66 (last close),104.26,54.61,46.09,2.18,2.73,85.0,100.0,2027-02-11
+PLTR,58,WATCH,False,1.5,148.57,Hold above $148.57 (last close),142.64,165.0,170.0,2.77,3.61,145.0,165.0,2027-02-01
+SMH,35,WATCH,False,-0.5,421.61,Hold below $421.61 (last close),506.86,366.72,353.0,0.64,0.8,420.0,500.0,
+SNDK,41,WATCH,False,-0.5,82.47,Hold below $82.47 (last close),98.23,56.59,50.12,1.64,2.05,80.0,95.0,2027-02-15
+LITE,31,WATCH,False,1.5,488.55,Hold above $488.55 (last close),394.65,550.0,581.3,0.65,0.99,480.0,550.0,2027-02-02
+INTC,36,WATCH,False,0.5,54.08,Hold above $54.08 (last close),52.0,60.0,62.08,2.84,3.84,54.0,60.0,2027-01-28
+CRWV,23,WATCH,True,-0.5,40.95,Hold below $40.95 (last close),46.57,28.39,25.25,2.24,2.8,40.0,45.0,2027-02-25
+SOFI,60,WATCH,False,-1.5,13.2,Hold below $13.20 (last close),15.19,11.65,11.26,0.78,0.98,13.0,15.0,2027-01-29
+IBIT,29,WATCH,False,-1.5,33.95,Hold below $33.95 (last close),37.36,33.0,30.0,0.28,1.16,33.0,37.0,
+SLV,30,WATCH,False,-0.5,37.38,Hold below $37.38 (last close),40.4,35.0,30.0,0.79,2.45,35.0,40.0,
+GLD,59,WATCH,False,1.0,323.53,Hold above $323.53 (last close),318.09,350.0,380.0,4.87,10.39,320.0,350.0,
+DRAM,28,WATCH,False,0.5,35.45,Hold above $35.45 (last close),30.48,40.0,41.66,0.92,1.25,35.0,40.0,
+XLF,45,WATCH,False,-0.5,55.7,Hold below $55.70 (last close),56.26,55.0,54.0,1.25,3.03,55.0,56.0,
+XLV,41,WATCH,False,0.0,179.39,Hold above $179.39 (last close),176.58,187.05,188.96,2.72,3.4,175.0,180.0,
+KRE,24,WATCH,False,-0.5,69.83,Hold below $69.83 (last close),74.23,69.0,68.0,0.19,0.42,69.0,70.0,
+META,15,WATCH,False,0.0,576.59,Hold above $576.59 (last close),542.73,621.73,633.02,1.33,1.67,575.0,585.0,2027-01-27
+AMZN,60,LONG,False,2.0,255.52,Hold above $255.52 (last close),250.03,277.26,282.7,3.96,4.95,255.0,260.0,2027-02-04
+NFLX,56,WATCH,False,-1.0,58.91,Hold below $58.91 (last close),60.48,55.1,54.14,2.43,3.04,58.0,60.0,2027-01-19
+ORCL,25,WATCH,False,-1.5,105.72,Hold below $105.72 (last close),121.92,90.36,86.53,0.95,1.18,105.0,120.0,2026-12-14
+CRM,26,SHORT,False,-2.0,188.64,Hold below $188.64 (last close),197.2,171.0,166.59,2.06,2.57,185.0,195.0,2026-12-02
+FRO,38,WATCH,True,1.0,45.57,Hold above $45.57 (last close),44.47,50.0,54.2,4.03,7.84,45.0,50.0,
+KEYS,13,WATCH,True,0.5,272.67,Hold above $272.67 (last close),247.21,300.0,310.0,1.07,1.47,270.0,300.0,2027-02-23
+ROST,34,LONG,True,2.0,213.41,Hold above $213.41 (last close),207.52,220.0,230.0,1.12,2.81,200.0,220.0,2027-03-04
+INTU,38,SHORT,True,-2.0,296.58,Break & hold below $284.06 (reaction-day low),352.81,268.09,260.97,0.23,0.34,290.0,300.0,2027-02-25
+WSM,55,WATCH,True,0.5,219.16,Hold above $219.16 (last close),206.94,250.0,260.0,2.52,3.34,210.0,250.0,2027-03-17
+WMG,6,WATCH,True,-1.0,32.08,Break & hold below $30.90 (reaction-day low),33.8,30.01,29.5,0.31,0.48,32.0,34.0,2027-02-04
+FUTU,33,WATCH,True,-1.0,86.08,Hold below $86.08 (last close),91.36,75.17,72.44,2.06,2.58,85.0,90.0,2027-03-11
+PANW,22,WATCH,True,0.0,351.97,Break & hold above $370.00 (reaction-day high),299.25,392.56,402.7,0.32,0.46,350.0,360.0,2027-02-16
+P,21,WATCH,True,0.5,97.69,Break & hold above $116.51 (reaction-day high),92.61,116.81,121.6,0.01,0.21,95.0,100.0,2027-02-24
+WWD,36,WATCH,True,1.5,328.12,Break & hold above $350.00 (reaction-day high),305.84,340.0,360.0,-0.23,0.23,310.0,340.0,2027-02-01
+TJX,50,WATCH,True,-0.5,140.45,Hold below $140.45 (last close),144.85,130.6,128.14,2.23,2.79,140.0,145.0,2027-02-24
+TGT,76,LONG,True,2.5,169.99,Break & hold above $171.91 (reaction-day high),163.45,182.37,185.46,1.24,1.6,165.0,170.0,2027-03-03
+LOW,38,SHORT,True,-2.0,225.06,Hold below $225.06 (last close),231.88,210.0,206.24,2.21,2.76,225.0,230.0,2027-02-24
+VIK,60,LONG,True,2.5,94.33,Break & hold above $95.07 (reaction-day high),88.94,102.85,104.98,1.27,1.61,90.0,95.0,2027-03-02
+DIS,34,WATCH,True,1.5,119.72,Break & hold above $123.37 (reaction-day high),116.32,126.35,128.0,0.42,0.66,119.0,120.0,2027-02-01
+HD,42,SHORT,True,-2.0,343.66,Break & hold below $334.44 (reaction-day low),352.61,322.81,317.6,0.64,0.93,340.0,350.0,2027-02-23
+AS,18,WATCH,True,-1.0,29.07,Hold below $29.07 (last close),30.37,28.0,25.0,0.82,3.13,28.0,30.0,2027-02-23
+TME,35,WATCH,True,-1.0,9.01,Hold below $9.01 (last close),9.83,8.0,7.65,1.23,1.66,8.0,10.0,2027-03-16
+ACM,47,WATCH,True,-0.5,80.28,Hold below $80.28 (last close),84.61,65.0,61.82,3.53,4.26,65.0,85.0,2027-02-08
+TSN,21,WATCH,True,1.0,64.69,Break & hold above $65.34 (reaction-day high),61.95,69.06,70.16,1.1,1.42,62.5,65.0,2027-02-08
+ARMK,40,LONG,True,3.0,54.59,Break & hold above $55.44 (reaction-day high),50.68,58.79,60.0,0.7,0.96,50.0,55.0,2027-02-10
+HTHT,40,LONG,True,2.0,51.26,Break & hold above $55.78 (reaction-day high),49.62,55.0,60.0,-0.13,0.68,50.0,55.0,2027-03-18
