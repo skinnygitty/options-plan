@@ -478,7 +478,7 @@ def tier(rank):
         else ("Fair", "t4") if rank >= 60 else ("Marginal", "t5")
 
 
-def render_plan(results, upcoming, today, errors, MIN_RR, STRAT_TFS, SHOW_MIN=51):
+def render_plan(results, upcoming, today, errors, MIN_RR, STRAT_TFS, SHOW_MIN=51, excluded=()):
     all_results = results
     hidden = [r for r in results if r["plan"].get("rank", 0) < SHOW_MIN]
     results = [r for r in results if r["plan"].get("rank", 0) >= SHOW_MIN]
@@ -578,6 +578,9 @@ The lean comes from where the last trade printed between bid and ask; open inter
 </table></div></div>
 <p class='muted' style='margin-top:12px'>On the line: the diamond is the entry, red is the stop and risk zone, green is the reward zone out to the targets,
 the ring is the last close, and grey ticks are the call and put walls.</p></section>""")
+    if excluded:
+        b.append(f"<details class='hidden-list'><summary>{len(excluded)} excluded (OTC, under $10B, or low institutional ownership)</summary>"
+                 "<p class='muted'>" + "; ".join(f"{e(s_)}: {e(w_)}" for s_, w_ in excluded) + "</p></details>")
     if errors:
         b.append("<section class='block'><h2>Skipped</h2><p>" + ", ".join(f"{e(s)} ({e(m)})" for s, m in errors) + "</p></section>")
     b.append(f"<footer>Updated {dt.datetime.now().strftime('%b %-d at %-I:%M %p').replace('AM','am').replace('PM','pm')} ET. Built from free Yahoo Finance data after the close. Check every level on your own chart before trading. Not financial advice.</footer>")
@@ -628,7 +631,7 @@ def render_check(rows, oi_rows, early, futs, stale, plan_date, today, now_str):
     if nX: bits.append(f"{nX} extended")
     if nF: bits.append(f"{nF} failed")
     if nW: bits.append(f"{nW} still waiting")
-    head = ", ".join(bits) if bits else "No plans to check"
+    head = ", ".join(bits) if bits else "No trades to check today"
     fut = "  ".join(f"{n} {g:+.2%}" for n, g in futs)
     b = [f"<section class='hero'><p class='when'>{nice_day(today)} at {e(now_str)}, plans from the {dt.date.fromisoformat(plan_date).strftime('%b')} {dt.date.fromisoformat(plan_date).day} close</p>"
          f"<h1>{e(head[0].upper() + head[1:])}</h1>"
@@ -640,7 +643,8 @@ def render_check(rows, oi_rows, early, futs, stale, plan_date, today, now_str):
              f"<button data-f='Extended' aria-pressed='false'>Extended<span class='n'>{nX}</span></button></div>")
     b.append("<div class='list'>")
     if not rows:
-        b.append("<div class='empty'>The morning check hasn't run yet today. It reads last night's plan and runs at 9:50 am on weekdays.</div>")
+        b.append("<div class='empty'>Last night's scan had no trades ranked above 50, so there's nothing to check this morning. "
+                 "Flow alerts and the hidden list on the Tonight page show what came closest.</div>")
     order = ["Triggered", "Extended", "Waiting", "At target", "Failed", "Stopped"]
     for r in sorted(rows, key=lambda r: (order.index(r["state"]), -(r.get("rank") or 0))):
         lv = [("Stop", r["stop"], "stop"), ("Entry", r["trig"], "entry"), ("T1", r["t1"], "t"), ("Now", r["now"], "now")]

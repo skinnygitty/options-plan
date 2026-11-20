@@ -51,6 +51,16 @@ KEEP_REPORT_DAYS = 30
 
 DISCOVER_RECENT_EARNINGS = True   # add stocks that just reported (from Yahoo's earnings calendar)
 DISCOVER_MIN_MCAP = 10e9          # only large caps with liquid options
+
+# Which stocks are allowed at all (watchlist, earnings discoveries, and the "reporting soon" list)
+ALLOWED_EXCHANGES = {             # Yahoo exchange codes
+    "NMS", "NGM", "NCM", "NAS",   # Nasdaq (Global Select / Global / Capital Market)
+    "NYQ", "NYS", "ASE", "PCX",   # NYSE, NYSE American, NYSE Arca
+    "BTS", "BZX", "CBO", "CXE",   # Cboe
+}
+MIN_MARKET_CAP = 10e9             # $10B+
+MIN_INSTITUTIONAL = 0.40          # 40%+ held by institutions (from quarterly 13F filings)
+PROFILE_CACHE_DAYS = 7            # re-check exchange / cap / ownership weekly
 DISCOVER_LOOKBACK_DAYS = 6        # calendar days back to look for reporters
 MAX_DISCOVERED = 40
 
@@ -1050,6 +1060,55 @@ def scan_one(sym, today, events):
                 strat=strat, tfc=tfc, flowx=flowx)
 
 
+# ----------------------------------------------------------------------------
+# Eligibility: exchange-listed, large cap, institutionally held (no OTC)
+# ----------------------------------------------------------------------------
+_PROFILES = None
+
+
+def _profiles():
+    global _PROFILES
+    if _PROFILES is None:
+        f = REPORT_DIR / "profiles.json"
+        try:
+            _PROFILES = json.loads(f.read_text())
+        except Exception:
+            _PROFILES = {}
+    return _PROFILES
+
+
+def save_profiles():
+    if _PROFILES is not None:
+        REPORT_DIR.mkdir(exist_ok=True)
+        (REPORT_DIR / "profiles.json").write_text(json.dumps(_PROFILES))
+
+
+def eligible(sym):
+    """Returns (ok, reason). ETFs on an allowed exchange pass the cap/ownership tests."""
+    prof = _profiles()
+    p = prof.get(sym)
+    fresh = p and (dt.date.today() - dt.date.fromisoformat(p["checked"])).days < PROFILE_CACHE_DAYS
+    if not fresh:
+        try:
+            info = retry(lambda: yf.Ticker(sym).info) or {}
+        except Exception as ex:
+            return True, f"profile unavailable ({str(ex)[:40]})"   # don't drop a name because Yahoo hiccuped
+        p = dict(checked=dt.date.today().isoformat(), exchange=info.get("exchange"),
+                 qtype=info.get("quoteType"), mcap=info.get("marketCap"),
+                 inst=info.get("heldPercentInstitutions"), name=info.get("shortName"))
+        prof[sym] = p
+    ex = (p.get("exchange") or "").upper()
+    if ex not in ALLOWED_EXCHANGES:
+        return False, f"not on Nasdaq/NYSE/Cboe ({ex or 'unknown'})"
+    if (p.get("qtype") or "").upper() == "ETF":
+        return True, ""
+    if (p.get("mcap") or 0) < MIN_MARKET_CAP:
+        return False, f"market cap {money(p.get('mcap') or 0)} under {money(MIN_MARKET_CAP)}"
+    if p.get("inst") is not None and p["inst"] < MIN_INSTITUTIONAL:
+        return False, f"institutions hold {p['inst']:.0%} (under {MIN_INSTITUTIONAL:.0%})"
+    return True, ""
+
+
 def main():
     today = dt.date.today()
     REPORT_DIR.mkdir(exist_ok=True)
@@ -1060,7 +1119,19 @@ def main():
         if s not in universe:
             universe.append(s)
     upcoming = [u for u in upcoming if u[0] not in recent]
-    log(f"Scanning {len(universe)} tickers ({len(recent)} recent reporters added)")
+    excluded = []
+    keep_u = []
+    for sym in universe:
+        ok, why = eligible(sym)
+        if ok:
+            keep_u.append(sym)
+        else:
+            excluded.append((sym, why))
+            log(f"  excluded {sym}: {why}")
+    universe = keep_u
+    upcoming = [u for u in upcoming if eligible(u[0])[0]]
+    save_profiles()
+    log(f"Scanning {len(universe)} tickers ({len(recent)} recent reporters considered, {len(excluded)} excluded)")
     results, errors = [], []
     for i, sym in enumerate(universe, 1):
         try:
@@ -1069,7 +1140,7 @@ def main():
         except Exception as ex:
             errors.append((sym, str(ex)[:120]))
             log(f"  skipped {sym}: {ex}")
-    page = SR.render_plan(results, upcoming, today, errors, MIN_RR, STRAT_TFS, SHOW_MIN_RANK)
+    page = SR.render_plan(results, upcoming, today, errors, MIN_RR, STRAT_TFS, SHOW_MIN_RANK, excluded)
     publish_housekeeping()
     (SITE_DIR / "index.html").write_text(page)
     if not (SITE_DIR / "check.html").exists():
@@ -1263,7 +1334,7 @@ def check():
                     live = dict(bid=float(q["bid"]), ask=float(q["ask"]), last=float(q["lastPrice"]),
                                 mid=float(q["mid"]), vol=int(q["volume"]))
         row.update(plan_action(p, row, live))
-        now_str = dt.datetime.now().strftime("%-I:%M %p").lower()
+    now_str = dt.datetime.now().strftime("%-I:%M %p").lower()
     page = SR.render_check(rows, oi_rows, early, futs, stale and bool(oi_rows), data["date"], today, now_str)
     publish_housekeeping()
     (SITE_DIR / "check.html").write_text(page)
