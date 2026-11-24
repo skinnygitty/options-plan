@@ -1,0 +1,165 @@
+<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1,viewport-fit=cover'><meta name='robots' content='noindex,nofollow'><meta name='theme-color' content='#EDF0F3' media='(prefers-color-scheme: light)'><meta name='theme-color' content='#0E151C' media='(prefers-color-scheme: dark)'><title>Plan for 2026-11-24</title><link rel='preconnect' href='https://fonts.googleapis.com'><link rel='preconnect' href='https://fonts.gstatic.com' crossorigin><link href='https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=Instrument+Sans:wght@400;500;600&display=swap' rel='stylesheet'><style>
+:root{--bg:#EDF0F3;--surface:#FFFFFF;--ink:#15202B;--muted:#5B6875;--line:#D9DEE4;
+--long:#0B7A55;--long-soft:#DDF1E8;--short:#B93A32;--short-soft:#F8E3E0;--signal:#3346C8;--signal-soft:#E3E7FB;
+--amber:#9A6200;--amber-soft:#FBEFD8;--radius-card:14px;--radius-pill:999px;
+--display:'Bricolage Grotesque',ui-sans-serif,system-ui,sans-serif;--text:'Instrument Sans',ui-sans-serif,system-ui,-apple-system,sans-serif}
+@media (prefers-color-scheme:dark){:root{--bg:#0E151C;--surface:#162029;--ink:#E6EBF0;--muted:#8D9AA6;--line:#26323D;
+--long:#3CC48F;--long-soft:#12352A;--short:#F07167;--short-soft:#3B1E1C;--signal:#8C9BFF;--signal-soft:#202A55;--amber:#E8B04B;--amber-soft:#3A2C12}}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font:400 15px/1.55 var(--text);font-variant-numeric:tabular-nums}
+a{color:inherit}
+.wrap{max-width:1280px;margin:0 auto;padding:0 18px 64px}
+.hero,.alerts,section.block,footer,.chips{max-width:760px}
+header.top{position:sticky;top:0;z-index:5;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(10px);
+ -webkit-backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
+header.top .wrap{display:flex;align-items:center;justify-content:space-between;gap:12px;padding-top:10px;padding-bottom:10px}
+.brand{font:700 17px/1 var(--display);letter-spacing:-.01em}
+nav.tabs{display:flex;gap:4px;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius-pill);padding:3px}
+nav.tabs a{text-decoration:none;font-weight:500;font-size:14px;padding:6px 12px;border-radius:var(--radius-pill);color:var(--muted)}
+nav.tabs a[aria-current=page]{background:var(--ink);color:var(--surface)}
+.hero{padding:34px 0 8px}
+.hero .when{color:var(--muted);font-size:14px;margin:0 0 6px}
+.hero h1{font:700 clamp(30px,7vw,46px)/1.05 var(--display);letter-spacing:-.025em;margin:0;max-width:18ch}
+.hero p.sub{color:var(--muted);margin:12px 0 0;max-width:60ch}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin:22px 0 6px}
+.chips button{font:500 14px var(--text);color:var(--ink);background:var(--surface);border:1px solid var(--line);
+ border-radius:var(--radius-pill);padding:7px 14px;cursor:pointer}
+.chips button[aria-pressed=true]{background:var(--ink);color:var(--surface);border-color:var(--ink)}
+.chips button .n{color:var(--muted);margin-left:4px}
+.chips button[aria-pressed=true] .n{color:inherit;opacity:.7}
+button:focus-visible,a:focus-visible,summary:focus-visible{outline:2px solid var(--signal);outline-offset:2px}
+.list{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:12px;margin-top:14px;align-items:start}
+@media (min-width:1180px){.list{grid-template-columns:repeat(4,1fr)}}
+.card.cc:has(details.more[open]){grid-column:1 / -1}
+.card.cc.open{grid-column:1 / -1}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius-card);padding:18px 18px 6px}
+.card[hidden]{display:none}
+.head{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sym{font:700 26px/1 var(--display);letter-spacing:-.02em}
+.pill{font-size:13px;font-weight:600;padding:3px 10px;border-radius:var(--radius-pill);white-space:nowrap}
+.pill.LONG{background:var(--long-soft);color:var(--long)}.pill.SHORT{background:var(--short-soft);color:var(--short)}
+.pill.WATCH{background:var(--bg);color:var(--muted)}.pill.POST{background:var(--amber-soft);color:var(--amber)}
+.pill.GOOD{background:var(--long-soft);color:var(--long)}.pill.BAD{background:var(--short-soft);color:var(--short)}
+.pill.WAIT{background:var(--signal-soft);color:var(--signal)}
+.rr{margin-left:auto;font-weight:600;font-size:14px}
+.rr.ok{color:var(--long)}.rr.no{color:var(--muted)}
+.enter{margin:14px 0 0;font-size:15px}
+.enter b{font-weight:600}
+.ladder{position:relative;height:74px;margin:10px 4px 2px}
+.ladder .rail{position:absolute;left:0;right:0;top:36px;height:2px;background:var(--line);border-radius:2px}
+.ladder .band{position:absolute;top:32px;height:10px;border-radius:3px}
+.band.risk{background:var(--short-soft)}.band.reward{background:var(--long-soft)}.band.reward2{background:var(--long-soft);opacity:.5}
+.band.orng{background:var(--signal-soft);top:30px;height:14px}
+.mk{position:absolute;top:30px;width:2px;height:14px;transform:translateX(-1px);background:var(--muted)}
+.mk.stop{background:var(--short)}.mk.t{background:var(--long)}.mk.wall{background:var(--line);height:10px;top:32px}
+.mk.entry{width:12px;height:12px;top:31px;transform:translateX(-6px) rotate(45deg);background:var(--signal);border-radius:2px}
+.mk.last{width:12px;height:12px;top:31px;transform:translateX(-6px);border-radius:50%;background:var(--surface);border:2px solid var(--ink)}
+.mk.now{width:14px;height:14px;top:30px;transform:translateX(-7px);border-radius:50%;background:var(--ink)}
+.lb{position:absolute;font-size:12px;line-height:1.1;color:var(--muted);white-space:nowrap;transform:translateX(-50%)}
+.lb.up{top:6px}.lb.dn{top:52px}
+.lb.edge-l{transform:none}.lb.edge-r{transform:translateX(-100%)}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:8px 0 4px}
+.stat span{display:block;font-size:12px;color:var(--muted)}
+.stat b{font-weight:600;font-size:15px}
+details.more{border-top:1px solid var(--line);margin-top:12px}
+details.more summary{cursor:pointer;list-style:none;padding:12px 0;font-weight:500;color:var(--muted);font-size:14px}
+details.more summary::-webkit-details-marker{display:none}
+details.more summary::after{content:'+';float:right;font-size:18px;line-height:1}
+details.more[open] summary::after{content:'–'}
+details.more[open] summary{color:var(--ink)}
+.body h3{font:700 16px/1.3 var(--display);margin:18px 0 6px}
+.body h3:first-child{margin-top:0}
+.body ul{margin:4px 0 8px;padding-left:18px}.body li{margin:2px 0}
+.body p{margin:4px 0 8px}
+.check{list-style:none;padding:0!important}.check li{display:flex;gap:8px}
+.muted{color:var(--muted)}.warn{color:var(--short)}.good{color:var(--long)}
+.scroll{overflow-x:auto;-webkit-overflow-scrolling:touch;margin:4px 0 10px}
+table{border-collapse:collapse;width:100%;font-size:13.5px}
+th,td{text-align:left;padding:7px 10px 7px 0;border-bottom:1px solid var(--line);vertical-align:top;white-space:nowrap}
+th{font-weight:500;color:var(--muted)}
+td.wrap-ok{white-space:normal;min-width:180px}
+.tfc{display:inline-flex;gap:4px;vertical-align:middle;margin-left:6px}
+.tfc i{font-style:normal;font-size:12px;font-weight:600;width:22px;height:22px;display:inline-grid;place-items:center;border-radius:6px}
+.tfc i.G{background:var(--long-soft);color:var(--long)}.tfc i.R{background:var(--short-soft);color:var(--short)}
+section.block{margin-top:40px}
+section.block h2{font:700 22px/1.2 var(--display);letter-spacing:-.015em;margin:0 0 4px}
+section.block > p{color:var(--muted);margin:0 0 12px;max-width:60ch}
+.plain{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius-card);padding:6px 18px}
+footer{color:var(--muted);font-size:13px;margin-top:48px;max-width:62ch}
+.alerts{margin-top:26px}
+.alerts h2{font:700 22px/1.2 var(--display);letter-spacing:-.015em;margin:0 0 2px}
+.alerts > p{margin:0 0 10px}
+a.alert{display:grid;grid-template-columns:auto auto 1fr;gap:4px 10px;align-items:baseline;text-decoration:none;
+ background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--signal);border-radius:10px;padding:10px 14px;margin:6px 0}
+a.alert .sym-s{font:700 18px/1 var(--display)}
+a.alert .pill{justify-self:start}
+a.alert .atext{font-size:14px;color:var(--muted)}
+@media (max-width:520px){a.alert{grid-template-columns:auto 1fr}a.alert .atext{grid-column:1 / -1}}
+.card{scroll-margin-top:70px}
+.tk-title{margin:14px 0 6px;font-weight:600;font-size:14px;color:var(--muted)}
+dl.ticket{display:grid;grid-template-columns:78px 1fr;gap:8px 12px;margin:0 0 6px;font-size:15px}
+dl.ticket dt{color:var(--muted);font-size:13.5px;padding-top:1px}
+dl.ticket dd{margin:0}
+dl.ticket b{font-weight:600}
+dl.ticket .opt{display:block;color:var(--muted);font-size:13px;margin-top:1px}
+.rank{margin-left:auto;display:inline-flex;align-items:baseline;gap:5px;padding:4px 10px;border-radius:10px;background:var(--bg)}
+.rank b{font:700 22px/1 var(--display);letter-spacing:-.02em}
+.rank i{font-style:normal;font-size:12px;font-weight:600;color:var(--muted)}
+.rank.t1{background:var(--long);color:#fff}.rank.t1 i{color:#fff;opacity:.85}
+.rank.t2{background:var(--long-soft);color:var(--long)}.rank.t2 i{color:var(--long)}
+.rank.t3{background:var(--signal-soft);color:var(--signal)}.rank.t3 i{color:var(--signal)}
+.rank.t5{background:var(--amber-soft);color:var(--amber)}.rank.t5 i{color:var(--amber)}
+.pill.HIV{background:#F6E6FF;color:#7A2E9C}
+@media (prefers-color-scheme:dark){.pill.HIV{background:#35213F;color:#D9A6F0}.rank.t1{color:#0E151C}.rank.t1 i{color:#0E151C}}
+details.hidden-list{margin-top:14px;color:var(--muted);font-size:14px}
+details.hidden-list summary{cursor:pointer}
+.action{margin:14px 0 4px;padding:12px 14px;border-radius:10px;font-size:15.5px;line-height:1.5;background:var(--bg)}
+.action.go{background:var(--long-soft)}.action.wait{background:var(--signal-soft)}.action.no{background:var(--bg);color:var(--muted)}
+.action b{font-weight:700}
+.inst{margin:10px 0 0;padding:10px 0 2px;border-top:1px solid var(--line)}
+.inst p{margin:2px 0;font-size:14.5px}
+.card.cc{padding:14px 14px 2px}
+.card.cc .sym{font-size:22px}
+.card.cc .head{flex-wrap:nowrap;align-items:center}
+.card.cc .pill{font-size:12px;padding:2px 9px}
+.card.cc .rank b{font-size:19px}
+.act{margin:10px 0 8px;padding:9px 11px;border-radius:9px;font-size:14px;line-height:1.45;background:var(--bg)}
+.act.go{background:var(--long-soft)}.act.wait{background:var(--signal-soft)}.act.no{color:var(--muted)}
+.act b{font-weight:700}
+.mini{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin:4px 0 6px}
+.mini span{display:block;font-size:11.5px;color:var(--muted)}
+.mini b{font-weight:600;font-size:14px}
+.chips-s{display:flex;flex-wrap:wrap;gap:5px;margin:2px 0 4px}
+.chip{font-size:12px;font-weight:500;padding:2px 8px;border-radius:999px;background:var(--bg);color:var(--muted)}
+.chip.LONG{background:var(--long-soft);color:var(--long)}.chip.SHORT{background:var(--short-soft);color:var(--short)}
+.chip.HIV{background:#F6E6FF;color:#7A2E9C}.chip.POST{background:var(--amber-soft);color:var(--amber)}
+@media (prefers-color-scheme:dark){.chip.HIV{background:#35213F;color:#D9A6F0}}
+.card.cc details.more{margin-top:6px}
+.card.cc details.more summary{padding:9px 0}
+.detail-wrap{max-width:760px}
+.empty{background:var(--surface);border:1px dashed var(--line);border-radius:var(--radius-card);padding:28px 18px;color:var(--muted)}
+@media (max-width:520px){.stats{grid-template-columns:repeat(2,1fr)}.sym{font-size:24px}.brand{display:none}
+ header.top .wrap{justify-content:center}.card{padding:16px 14px 4px}}
+@media (prefers-reduced-motion:no-preference){details.more[open] .body{animation:open .18s ease-out}
+ @keyframes open{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}}
+</style></head><body><header class='top'><div class='wrap'><span class='brand'>Options plan</span><nav class='tabs'><a href='index.html' aria-current=page>Tonight</a><a href='check.html' >Morning check</a></nav></div></header><main class='wrap'><section class='hero'><p class='when'>Plan for Tuesday, November 24, from the Nov 23 close</p><h1>Nothing clean for Tuesday</h1><p class='sub'>Ranked 0 to 100, best first. 0 more ranked 50 or below and are hidden. 0 shown just past earnings.</p></section><div class='chips' role='group' aria-label='Filter'><button data-f='all' aria-pressed='true'>All<span class='n'>0</span></button><button data-f='LONG' aria-pressed='false'>Long<span class='n'>0</span></button><button data-f='SHORT' aria-pressed='false'>Short<span class='n'>0</span></button><button data-f='post' aria-pressed='false'>Post-earnings<span class='n'>0</span></button><button data-f='WATCH' aria-pressed='false'>Watch<span class='n'>0</span></button></div><div class='list'><div class='empty'>No trade ranked above 50 tonight. That usually means setups are unclear or the contracts aren't liquid enough. The hidden list below shows what came closest.</div></div><section class='block'><h2>Reporting soon</h2><p>Implied volatility is high going into these. Skip buying options until after the report.</p><div class='plain'><div class='scroll'><table><tr><th>Ticker</th><th>Date</th><th>Timing</th></tr><tr><td><b>NTNX</b></td><td>2026-11-24</td><td>AMC</td></tr><tr><td><b>DELL</b></td><td>2026-11-24</td><td>AMC</td></tr><tr><td><b>HPQ</b></td><td>2026-11-24</td><td>AMC</td></tr><tr><td><b>WDAY</b></td><td>2026-11-24</td><td>AMC</td></tr><tr><td><b>ADSK</b></td><td>2026-11-24</td><td>AMC</td></tr><tr><td><b>BBY</b></td><td>2026-11-24</td><td>BMO</td></tr><tr><td><b>BURL</b></td><td>2026-11-24</td><td>BMO</td></tr><tr><td><b>SJM</b></td><td>2026-11-24</td><td>BMO</td></tr><tr><td><b>DKS</b></td><td>2026-11-24</td><td>BMO</td></tr><tr><td><b>MDT</b></td><td>2026-11-24</td><td>BMO</td></tr><tr><td><b>ADI</b></td><td>2026-11-24</td><td>BMO</td></tr><tr><td><b>DLTR</b></td><td>2026-11-24</td><td>BMO</td></tr><tr><td><b>DE</b></td><td>2026-11-25</td><td>BMO</td></tr><tr><td><b>RBRK</b></td><td>2026-11-30</td><td>AMC</td></tr><tr><td><b>OKTA</b></td><td>2026-12-01</td><td>AMC</td></tr><tr><td><b>MRVL</b></td><td>2026-12-01</td><td>AMC</td></tr><tr><td><b>CRDO</b></td><td>2026-12-01</td><td>AMC</td></tr><tr><td><b>NTAP</b></td><td>2026-12-01</td><td>AMC</td></tr><tr><td><b>MDB</b></td><td>2026-12-01</td><td>AMC</td></tr><tr><td><b>CPRT</b></td><td>2026-12-01</td><td>BMO</td></tr><tr><td><b>NTSK</b></td><td>2026-12-02</td><td>AMC</td></tr><tr><td><b>CRM</b></td><td>2026-12-02</td><td>AMC</td></tr><tr><td><b>SNOW</b></td><td>2026-12-02</td><td>AMC</td></tr><tr><td><b>FIVE</b></td><td>2026-12-02</td><td>AMC</td></tr><tr><td><b>BMO</b></td><td>2026-12-02</td><td>BMO</td></tr><tr><td><b>BNS</b></td><td>2026-12-02</td><td>BMO</td></tr></table></div></div></section><section class='block'><h2>Reading the flow</h2><p>Free data can't prove a trade was bought or sold.
+The lean comes from where the last trade printed between bid and ask; open interest the next morning tells you whether it was new money.</p>
+<div class='plain'><div class='scroll'><table>
+<tr><th>What printed</th><th>Usually means</th></tr>
+<tr><td>Calls bought, OI up next day</td><td class='wrap-ok'>Bullish, new money</td></tr>
+<tr><td>Puts sold, OI up</td><td class='wrap-ok'>Bullish; the seller is happy to own lower</td></tr>
+<tr><td>Puts bought, OI up</td><td class='wrap-ok'>Bearish, or a hedge on stock if price is at highs</td></tr>
+<tr><td>Calls sold, OI up</td><td class='wrap-ok'>A cap overhead; often covered calls</td></tr>
+<tr><td>Big volume, OI down</td><td class='wrap-ok'>Positions closing; not a new signal</td></tr>
+</table></div></div>
+<p class='muted' style='margin-top:12px'>On the line: the diamond is the entry, red is the stop and risk zone, green is the reward zone out to the targets,
+the ring is the last close, and grey ticks are the call and put walls.</p></section><details class='hidden-list'><summary>10 excluded (OTC, under $10B, or low institutional ownership)</summary><p class='muted'>WMT: institutions hold 38% (under 40%); PDD: institutions hold 30% (under 40%); BABA: institutions hold 10% (under 40%); NTES: institutions hold 9% (under 40%); KUASF: not on Nasdaq/NYSE/Cboe (PNK); TCEHY: not on Nasdaq/NYSE/Cboe (PNK); SQM: institutions hold 32% (under 40%); ZTO: institutions hold 13% (under 40%); JD: institutions hold 16% (under 40%); ESLT: institutions hold 27% (under 40%)</p></details><section class='block'><h2>Skipped</h2><p>SPY (no listed options in range), QQQ (no listed options in range), IWM (no listed options in range), ANET (no listed options in range), LLY (no listed options in range), NVDA (no listed options in range), MU (no listed options in range), GOOGL (no listed options in range), AMD (no listed options in range), AAPL (no listed options in range), AVGO (no listed options in range), MSFT (no listed options in range), TSLA (no listed options in range), NBIS (no listed options in range), PLTR (no listed options in range), SMH (no listed options in range), SNDK (no listed options in range), LITE (no listed options in range), SPCX (not enough price history), INTC (no listed options in range), CRWV (no listed options in range), SOFI (no listed options in range), IBIT (no listed options in range), SLV (no listed options in range), GLD (no listed options in range), DRAM (no listed options in range), XLF (no listed options in range), XLV (no listed options in range), KRE (no listed options in range), META (no listed options in range), AMZN (no listed options in range), NFLX (no listed options in range), ORCL (no listed options in range), CRM (no listed options in range), BJ (no listed options in range), FRO (no listed options in range), BSP (not enough price history), KEYS (no listed options in range), ROST (no listed options in range), INTU (no listed options in range), WSM (no listed options in range), WMG (no listed options in range), FUTU (no listed options in range), PANW (no listed options in range), P (no listed options in range), WWD (no listed options in range), TJX (no listed options in range), TGT (no listed options in range), LOW (no listed options in range), VIK (no listed options in range), DIS (no listed options in range), AS (no listed options in range), HD (no listed options in range), TME (no listed options in range)</p></section><footer>Updated Nov 23 at 8:22 pm ET. Built from free Yahoo Finance data after the close. Check every level on your own chart before trading. Not financial advice.</footer></main>
+<script>
+(function(){var bs=document.querySelectorAll('.chips button'),cs=document.querySelectorAll('.card[data-dir]');
+bs.forEach(function(b){b.addEventListener('click',function(){bs.forEach(function(x){x.setAttribute('aria-pressed','false')});
+b.setAttribute('aria-pressed','true');var f=b.dataset.f;cs.forEach(function(c){var show=f==='all'||c.dataset.dir===f||(f==='post'&&c.dataset.post==='1');
+c.hidden=!show;});});});
+document.querySelectorAll('.card.cc details.more').forEach(function(d){d.addEventListener('toggle',function(){
+d.closest('.card').classList.toggle('open',d.open);});});})();
+</script></body></html>
